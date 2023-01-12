@@ -1,3 +1,7 @@
+# Notes
+This is a fork of the Intel Pin tool, downloaded from sourceforge. 
+Currently used for [Value Prediction study](https://github.com/haiyuem/Value-Prediction-for-Input-Data-Commonality). Modified code in source/tools/readMemVal
+
 #
 # Copyright (C) 2004-2022 Intel Corporation.
 # SPDX-License-Identifier: MIT
