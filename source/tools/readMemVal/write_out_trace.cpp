@@ -5,6 +5,7 @@
 
 //
 // Write out CVP friendly binary trace. Could also be configured to print out insn details as required by CVP traces (1-1 map in human-readable format)
+// Intel x86-64 instructions are "fused", e.g. one insn does both MEM and ALU. Because simulator only takes non-fused insns, we separated the fused insns into two with the same PC 
 // 
 //
 // Trace Format :
@@ -42,8 +43,6 @@ typedef std::list<REG> RegList;
 
 ofstream OutFile;
 ofstream ByteFile;
-int ct = 0;
-bool going = true;
 bool write_out_trace = true;
 bool print = false;
 bool print_ins = false;
@@ -70,42 +69,11 @@ INT32 Category,
 BOOL IsDirectControlFlow,
 OPCODE opcode,
 const string ins_str
-){
-    // if ((opcode == XED_ICLASS_ADD) || (opcode == XED_ICLASS_LEA) || (opcode == XED_ICLASS_MOV) || (opcode == XED_ICLASS_MOVAPS) || (opcode == XED_ICLASS_MOVSXD) || (opcode == XED_ICLASS_MOVUPS) || (opcode == XED_ICLASS_NOP) || (opcode == XED_ICLASS_RET_NEAR) || (opcode == XED_ICLASS_SHL) || (opcode == XED_ICLASS_SHUFPS) || (opcode == XED_ICLASS_SUB) || (opcode == XED_ICLASS_UNPCKHPS) || (opcode == XED_ICLASS_UNPCKLPS)
-    // ) return 0x0;
-    // if (opcode == XED_ICLASS_ADDPS) return 0x6;
-    // if ((opcode == XED_ICLASS_ADDPS) || (opcode == XED_ICLASS_IMUL) || (opcode == XED_ICLASS_MULPS)) 
+){ 
     if ((OPCODE_StringShort(opcode).find("MUL") != std::string::npos) || (OPCODE_StringShort(opcode).find("PS") != std::string::npos))
         return 0x7;
     else return 0x0;
-    //shouldn't happen, but if it happens, it's a mem ins only (like prefetch? handle in main func)
-    // if (IsMemoryRead) return 0x1;
-    // if (IsMemoryWrite) return 0x2;
-    // cerr << "Undefined opcode: " << ins_str <<endl;
-    // return -1;
 }
-
-// {XED_ICLASS_ADD, },
-// {XED_ICLASS_ADDPS, },
-// {XED_ICLASS_IMUL, },
-// {XED_ICLASS_JMP, },
-// {XED_ICLASS_JNZ, },
-// {XED_ICLASS_LEA, },
-// {XED_ICLASS_MOV, },
-// {XED_ICLASS_MOVAPS, },
-// {XED_ICLASS_MOVSXD, },
-// {XED_ICLASS_MOVUPS, },
-// {XED_ICLASS_MULPS, },
-// {XED_ICLASS_NOP, },
-// {XED_ICLASS_PREFETCHT0, },
-// {XED_ICLASS_PREFETCHT1, },
-// {XED_ICLASS_RET_NEAR, },
-// {XED_ICLASS_SHL, },
-// {XED_ICLASS_SHUFPS, },
-// {XED_ICLASS_SUB, },
-// {XED_ICLASS_UNPCKHPS, },
-// {XED_ICLASS_UNPCKLPS, }
-
 
 // Num Input Regs 			- 1 byte
 // Input Reg Names 			- 1 byte each
@@ -114,121 +82,96 @@ const string ins_str
 // Output Reg Values ----NO LONGER NEEDED!
 //   If INT (0 to 31) or FLAG (64) 	- 8 bytes each
 //   If SIMD (32 to 63)		- 16 bytes each
-
 void Ins_InReg1(REG reg1){
-    if (going) {
-        char reg_num = 0x1;
-        if (write_out_trace) {
-            ByteFile.write(&reg_num, 1);
-            ByteFile.write((char*)(&reg1), 1);
-        }
-        if (print) OutFile << "\tin_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << endl;
+    char reg_num = 0x1;
+    if (write_out_trace) {
+        ByteFile.write(&reg_num, 1);
+        ByteFile.write((char*)(&reg1), 1);
     }
+    if (print) OutFile << "\tin_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << endl;
 }
 void Ins_InReg2(REG reg1, REG reg2){
-    if (going) {
-        char reg_num = 0x2;
-        if (write_out_trace) {
-            ByteFile.write(&reg_num, 1);
-            ByteFile.write((char*)(&reg1), 1);
-            ByteFile.write((char*)(&reg2), 1);
-        }
-        if (print) OutFile << "\tin_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << " in_reg2 " << reg2 << "(" << REG_StringShort(reg2) << ")" << endl;
+    char reg_num = 0x2;
+    if (write_out_trace) {
+        ByteFile.write(&reg_num, 1);
+        ByteFile.write((char*)(&reg1), 1);
+        ByteFile.write((char*)(&reg2), 1);
     }
+    if (print) OutFile << "\tin_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << " in_reg2 " << reg2 << "(" << REG_StringShort(reg2) << ")" << endl;
 }
 void Ins_InReg3(REG reg1, REG reg2, REG reg3){
-    if (going) {
-        char reg_num = 0x3;
-        if (write_out_trace) {
-            ByteFile.write(&reg_num, 1);
-            ByteFile.write((char*)(&reg1), 1);
-            ByteFile.write((char*)(&reg2), 1);
-            ByteFile.write((char*)(&reg3), 1);
-        }
-        if (print) OutFile << "\tin_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << " in_reg2 " << reg2 << "(" << REG_StringShort(reg2) << ")" << " in_reg3 " << reg3 << "(" << REG_StringShort(reg3) << ")" << endl;
+    char reg_num = 0x3;
+    if (write_out_trace) {
+        ByteFile.write(&reg_num, 1);
+        ByteFile.write((char*)(&reg1), 1);
+        ByteFile.write((char*)(&reg2), 1);
+        ByteFile.write((char*)(&reg3), 1);
     }
+    if (print) OutFile << "\tin_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << " in_reg2 " << reg2 << "(" << REG_StringShort(reg2) << ")" << " in_reg3 " << reg3 << "(" << REG_StringShort(reg3) << ")" << endl;
 }
+
 AFUNPTR InRegFuns[] = {AFUNPTR(Ins_InReg1), AFUNPTR(Ins_InReg2), AFUNPTR(Ins_InReg3)};
 
 void Ins_OutReg1(REG reg1){
-    if (going) {
-        char reg_num = 0x1;
-        if (write_out_trace) {
-            ByteFile.write(&reg_num, 1);
-            ByteFile.write((char*)(&reg1), 1);
-        }
-        if (print) OutFile << "\tout_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << endl;
-        // if (ct>=100) going = false;
+    char reg_num = 0x1;
+    if (write_out_trace) {
+        ByteFile.write(&reg_num, 1);
+        ByteFile.write((char*)(&reg1), 1);
     }
+    if (print) OutFile << "\tout_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << endl;
 }
 void Ins_OutReg2(REG reg1, REG reg2){
-    if (going) {
-        char reg_num = 0x2;
-        if (write_out_trace) {
-            ByteFile.write(&reg_num, 1);
-            ByteFile.write((char*)(&reg1), 1);
-            ByteFile.write((char*)(&reg2), 1);
-        }
-        if (print) OutFile << "\tout_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << " out_reg2 " << reg2 << "(" << REG_StringShort(reg2) << ")" << endl;
-        // if (ct>=100) going = false;
+    char reg_num = 0x2;
+    if (write_out_trace) {
+        ByteFile.write(&reg_num, 1);
+        ByteFile.write((char*)(&reg1), 1);
+        ByteFile.write((char*)(&reg2), 1);
     }
+    if (print) OutFile << "\tout_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << " out_reg2 " << reg2 << "(" << REG_StringShort(reg2) << ")" << endl;
 }
 void Ins_OutReg3(REG reg1, REG reg2, REG reg3){
-    if (going) {
-        char reg_num = 0x3;
-        if (write_out_trace) {
-            ByteFile.write(&reg_num, 1);
-            ByteFile.write((char*)(&reg1), 1);
-            ByteFile.write((char*)(&reg2), 1);
-            ByteFile.write((char*)(&reg3), 1);
-        }
-        if (print) OutFile << "\tout_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << " out_reg2 " << reg2 << "(" << REG_StringShort(reg2) << ")" << " out_reg3 " << reg3 << "(" << REG_StringShort(reg3) << ")" << endl;
-        // if (ct>=100) going = false;
+    char reg_num = 0x3;
+    if (write_out_trace) {
+        ByteFile.write(&reg_num, 1);
+        ByteFile.write((char*)(&reg1), 1);
+        ByteFile.write((char*)(&reg2), 1);
+        ByteFile.write((char*)(&reg3), 1);
     }
+    if (print) OutFile << "\tout_reg1 " << reg1 << "(" << REG_StringShort(reg1) << ")" << " out_reg2 " << reg2 << "(" << REG_StringShort(reg2) << ")" << " out_reg3 " << reg3 << "(" << REG_StringShort(reg3) << ")" << endl;
 }
 AFUNPTR OutRegFuns[] = {AFUNPTR(Ins_OutReg1), AFUNPTR(Ins_OutReg2), AFUNPTR(Ins_OutReg3)};
 
 void NoRegWriteZero(){
-    if (going) {
-        char reg_num = 0x0;
-        if (write_out_trace) ByteFile.write(&reg_num, 1);
-        // if (ct>=100) going = false;
-    }
+    char reg_num = 0x0;
+    if (write_out_trace) ByteFile.write(&reg_num, 1);
 }
 
-/*Intel x86-64 instructions are "fused", e.g. one insn does both MEM and ALU. Because simulator only takes non-fused insns, we separated the fused insns into two with the same PC */
 VOID Ins_MemRead(const string ins_str, 
 ADDRINT ins_addr,
 ADDRINT ins_addr_next,
 ADDRINT memread_addr,
 UINT32 memread_size
 ){
-    if (going){
-    //     ct++;
-    //     if (ct>=100) going = false;
-    // }
-    // if (going){
-        if (print_ins) OutFile << ins_str << endl;
-        if (print) OutFile << hex << "MemRead: PC: " << ins_addr << " " << ins_str << endl;
-        if (write_out_trace) ByteFile.write((char*)(&ins_addr), 8);
-        if (print) OutFile << hex << "\t next PC: " << ins_addr_next << endl;
-        if (write_out_trace) ByteFile.write((char*)(&ins_addr_next), 8);
-        // If load/storeInst
-        //   Effective Address 			- 8 bytes
-        //   Access Size (one reg)		- 1 byte
-        char inst_type = 0x1;
-        if (write_out_trace) {
-            ByteFile.write(&inst_type, 1);
-            ByteFile.write((char*)&memread_addr, 8);
-            ByteFile.write((char*)&memread_size, 1);
-        }
-        UINT64 value = 0;
-        size_t read_size = PIN_SafeCopy((VOID*)(&value), (VOID*)memread_addr, memread_size);
-        assert(read_size == (size_t)memread_size);
-
-        if (write_out_trace) ByteFile.write((char*)&value, 8);
-        if (print) OutFile << "\tInsType: 1, memread_addr:  " << memread_addr << " memread_size: " << memread_size << " val: " << value << endl;
+    if (print_ins) OutFile << ins_str << endl;
+    if (print) OutFile << hex << "MemRead: PC: " << ins_addr << " " << ins_str << endl;
+    if (write_out_trace) ByteFile.write((char*)(&ins_addr), 8);
+    if (print) OutFile << hex << "\t next PC: " << ins_addr_next << endl;
+    if (write_out_trace) ByteFile.write((char*)(&ins_addr_next), 8);
+    // If load/storeInst
+    //   Effective Address 			- 8 bytes
+    //   Access Size (one reg)		- 1 byte
+    char inst_type = 0x1;
+    if (write_out_trace) {
+        ByteFile.write(&inst_type, 1);
+        ByteFile.write((char*)&memread_addr, 8);
+        ByteFile.write((char*)&memread_size, 1);
     }
+    UINT64 value = 0;
+    size_t read_size = PIN_SafeCopy((VOID*)(&value), (VOID*)memread_addr, memread_size);
+    assert(read_size == (size_t)memread_size);
+
+    if (write_out_trace) ByteFile.write((char*)&value, 8);
+    if (print) OutFile << "\tInsType: 1, memread_addr:  " << memread_addr << " memread_size: " << memread_size << " val: " << value << endl;
 }
 
 VOID Ins_MemWrite(const string ins_str, 
@@ -237,25 +180,18 @@ ADDRINT ins_addr_next,
 ADDRINT memwrite_addr,
 UINT32 memwrite_size
 ){
-    // if (going){
-    //     ct++;
-    //     if (ct>=100) going = false;
-    // }
-    // if (going){
-        if (print_ins) OutFile << ins_str << endl;
-        if (print) OutFile << hex << "MemWrite: PC: " << ins_addr << " " << ins_str << endl;
-        if (write_out_trace) ByteFile.write((char*)(&ins_addr), 8);
-        if (print) OutFile << hex << "\t next PC: " << ins_addr_next << endl;
-        if (write_out_trace) ByteFile.write((char*)(&ins_addr_next), 8);
-        char inst_type = 0x2;
-        if (write_out_trace) {
-            ByteFile.write(&inst_type, 1);
-            ByteFile.write((char*)&memwrite_addr, 8);
-            ByteFile.write((char*)&memwrite_size, 1);
-        }
-        if (print) OutFile << "\tInsType: 2, memwrite_addr:  " << memwrite_addr << " memwrite_size: " << memwrite_size << endl;   
-        // if (ct>=100) going = false;
-    // }
+    if (print_ins) OutFile << ins_str << endl;
+    if (print) OutFile << hex << "MemWrite: PC: " << ins_addr << " " << ins_str << endl;
+    if (write_out_trace) ByteFile.write((char*)(&ins_addr), 8);
+    if (print) OutFile << hex << "\t next PC: " << ins_addr_next << endl;
+    if (write_out_trace) ByteFile.write((char*)(&ins_addr_next), 8);
+    char inst_type = 0x2;
+    if (write_out_trace) {
+        ByteFile.write(&inst_type, 1);
+        ByteFile.write((char*)&memwrite_addr, 8);
+        ByteFile.write((char*)&memwrite_size, 1);
+    }
+    if (print) OutFile << "\tInsType: 2, memwrite_addr:  " << memwrite_addr << " memwrite_size: " << memwrite_size << endl;   
 }
 
 VOID Ins_Branch(const string ins_str, 
@@ -266,43 +202,36 @@ BOOL IsDirectControlFlow,
 BOOL branch_taken,
 ADDRINT branch_target_addr
 ){
-    // if (going){
-    //     ct++;
-    //     if (ct>=1000) going = false;
-    // }
-    // if (going){
-        if (print_ins) OutFile << ins_str << endl;
-        if (print) OutFile << hex << "Branch: PC: " << ins_addr << " " << ins_str << endl;
+    if (print_ins) OutFile << ins_str << endl;
+    if (print) OutFile << hex << "Branch: PC: " << ins_addr << " " << ins_str << endl;
 
-        //Second round for non-MEM, excluding prefetch because they are just MEM 
-        // Inst PC 				- 8 bytes
-        if (write_out_trace) ByteFile.write((char*)(&ins_addr), 8);
-        ADDRINT ins_addr_next_br = branch_taken ? branch_target_addr : ins_addr_next;
-        // Inst PC Next				- 8 bytes
-        if (print) OutFile << hex << "\t next PC: " << ins_addr_next_br << endl;
-        if (write_out_trace) ByteFile.write((char*)(&ins_addr_next_br), 8);
-        // Inst Type			- 1 byte
-        char inst_type = 0x8; // invalid
-        if (Category == XED_CATEGORY_COND_BR) inst_type = 0x3;
-        // else if ((Category == XED_CATEGORY_UNCOND_BR) || (Category == XED_CATEGORY_RET)){
-        else {
-            if (IsDirectControlFlow) inst_type = 0x4;
-            else inst_type = 0x5;
-        }
-        if (inst_type == 0x8){
-            OutFile << "Ins type Error!!!! Ins: " << ins_str << " " << CATEGORY_StringShort(Category) << endl;
-            exit(-1);
-        }
-        if (write_out_trace) ByteFile.write(&inst_type, 1);
-        // If branch
-        //   Taken 				- 1 byte
-        if (write_out_trace) ByteFile.write((char*)(&branch_taken), 1);
-        if (print) OutFile << "\tInsType: " << (int)inst_type << " Branch Taken: " << branch_taken << endl;
-        // if (branch_taken){
-        //     ByteFile.write((char*)(&branch_target_addr), 8);
-        //     OutFile << "\tTarget: " << branch_target_addr << endl;
-        // }
-        // if (ct>=100) going = false;
+    //Second round for non-MEM, excluding prefetch because they are just MEM 
+    // Inst PC 				- 8 bytes
+    if (write_out_trace) ByteFile.write((char*)(&ins_addr), 8);
+    ADDRINT ins_addr_next_br = branch_taken ? branch_target_addr : ins_addr_next;
+    // Inst PC Next				- 8 bytes
+    if (print) OutFile << hex << "\t next PC: " << ins_addr_next_br << endl;
+    if (write_out_trace) ByteFile.write((char*)(&ins_addr_next_br), 8);
+    // Inst Type			- 1 byte
+    char inst_type = 0x8; // invalid
+    if (Category == XED_CATEGORY_COND_BR) inst_type = 0x3;
+    // else if ((Category == XED_CATEGORY_UNCOND_BR) || (Category == XED_CATEGORY_RET)){
+    else {
+        if (IsDirectControlFlow) inst_type = 0x4;
+        else inst_type = 0x5;
+    }
+    if (inst_type == 0x8){
+        OutFile << "Ins type Error!!!! Ins: " << ins_str << " " << CATEGORY_StringShort(Category) << endl;
+        exit(-1);
+    }
+    if (write_out_trace) ByteFile.write(&inst_type, 1);
+    // If branch
+    //   Taken 				- 1 byte
+    if (write_out_trace) ByteFile.write((char*)(&branch_taken), 1);
+    if (print) OutFile << "\tInsType: " << (int)inst_type << " Branch Taken: " << branch_taken << endl;
+    // if (branch_taken){
+    //     ByteFile.write((char*)(&branch_target_addr), 8);
+    //     OutFile << "\tTarget: " << branch_target_addr << endl;
     // }
 }
 
@@ -313,28 +242,21 @@ VOID* ins_addr_next,
 INT32 Category,
 BOOL IsDirectControlFlow
 ){
-    // if (going){
-    //     ct++;
-    //     if (ct>=1000) going = false;
-    // }
-    // if (going){
-        //Second round for non-MEM, excluding prefetch because they are just MEM 
-        if (print_ins) OutFile << ins_str << endl;
-        if ((opcode != XED_ICLASS_PREFETCHT0) && (opcode != XED_ICLASS_PREFETCHT1)){
-            // Inst PC 				- 8 bytes
-            if (print) OutFile << hex << "NonMem: PC: " << ins_addr << " " << ins_str << endl;
-            if (write_out_trace) ByteFile.write((char*)(&ins_addr), 8);
-            if (print) OutFile << hex << "\t next PC: " << ins_addr_next << endl;
-            if (write_out_trace) ByteFile.write((char*)(&ins_addr_next), 8);
-            // Inst Type			- 1 byte
-            char inst_type = op_type_map (Category, IsDirectControlFlow, opcode, ins_str);
-            if (write_out_trace) ByteFile.write(&inst_type, 1);
-            if (print) OutFile << "\tInst_type: " << (int)inst_type << " opcode:" << opcode << endl;            
-        }
-        // char* buffer = new char[1];
-        // buffer[0] = 0x1;
-        // if (ct>=100) going = false;
-    // }
+    //Second round for non-MEM, excluding prefetch because they are just MEM 
+    if (print_ins) OutFile << ins_str << endl;
+    if ((opcode != XED_ICLASS_PREFETCHT0) && (opcode != XED_ICLASS_PREFETCHT1)){
+        // Inst PC 				- 8 bytes
+        if (print) OutFile << hex << "NonMem: PC: " << ins_addr << " " << ins_str << endl;
+        if (write_out_trace) ByteFile.write((char*)(&ins_addr), 8);
+        if (print) OutFile << hex << "\t next PC: " << ins_addr_next << endl;
+        if (write_out_trace) ByteFile.write((char*)(&ins_addr_next), 8);
+        // Inst Type			- 1 byte
+        char inst_type = op_type_map (Category, IsDirectControlFlow, opcode, ins_str);
+        if (write_out_trace) ByteFile.write(&inst_type, 1);
+        if (print) OutFile << "\tInst_type: " << (int)inst_type << " opcode:" << opcode << endl;            
+    }
+    // char* buffer = new char[1];
+    // buffer[0] = 0x1;
 }
 
 void insert_call_regs(int num_regs_in, int num_regs_out, INS ins, IARGLIST regs_in, IARGLIST regs_out){
@@ -360,31 +282,14 @@ void insert_call_regs(int num_regs_in, int num_regs_out, INS ins, IARGLIST regs_
     }
 }
 
-// {XED_ICLASS_ADD, },
-// {XED_ICLASS_ADDPS, },
-// {XED_ICLASS_IMUL, },
-// {XED_ICLASS_JMP, },
-// {XED_ICLASS_JNZ, },
-// {XED_ICLASS_LEA, },
-// {XED_ICLASS_MOV, },
-// {XED_ICLASS_MOVAPS, },
-// {XED_ICLASS_MOVSXD, },
-// {XED_ICLASS_MOVUPS, },
-// {XED_ICLASS_MULPS, },
-// {XED_ICLASS_NOP, },
-// {XED_ICLASS_PREFETCHT0, },
-// {XED_ICLASS_PREFETCHT1, },
-// {XED_ICLASS_RET_NEAR, },
-// {XED_ICLASS_SHL, },
-// {XED_ICLASS_SHUFPS, },
-// {XED_ICLASS_SUB, },
-// {XED_ICLASS_UNPCKHPS, },
-// {XED_ICLASS_UNPCKLPS, }
 // Pin calls this function every time a new rtn is executed
+// separate fused insns (LD/ST + ALU) into two with the same PC 
+// First check if it's a LD/ST, then proceed normally as non-mem inst
 VOID Routine(RTN rtn, VOID* rtn_name_to_parse)
 {
     KNOB< string >* rtn_name_to_parse_ptr = (KNOB< string >*)rtn_name_to_parse;
     string rtn_name_to_parse_str = rtn_name_to_parse_ptr->Value().c_str();
+    // Here are different types of matches: exact match, matching substring RTN/IMG
     // if ((rtn_name_to_parse_str == "") || (RTN_Name(rtn) == rtn_name_to_parse_str)){
     if ((rtn_name_to_parse_str == "") || (RTN_Name(rtn).find(rtn_name_to_parse_str) != std::string::npos)){
     // if ((rtn_name_to_parse_str == "") || (IMG_Name(SEC_Img(RTN_Sec(rtn))).find(rtn_name_to_parse_str) != std::string::npos)){
