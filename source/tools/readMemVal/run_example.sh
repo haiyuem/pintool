@@ -1,1 +1,1 @@
-/home/haiyue/research/value_prediction/pin-3.24-98612-g6bd5931f2-gcc-linux/pin -t /home/haiyue/research/value_prediction/pin-3.24-98612-g6bd5931f2-gcc-linux/source/tools/readMemVal/obj-intel64/same_ins_load_pattern.so  -- /bin/ls
+/home/haiyue/research/value_prediction/pin-3.24-98612-g6bd5931f2-gcc-linux/pin -t /home/haiyue/research/value_prediction/pin-3.24-98612-g6bd5931f2-gcc-linux/source/tools/readMemVal/obj-intel64/print_ins_in_rtn.so  -- /bin/ls
