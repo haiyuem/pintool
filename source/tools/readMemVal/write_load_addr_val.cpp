@@ -7,6 +7,12 @@
 // Print [memaddr, data value] as 2d arrays for cluster analysis
 //
 
+/*
+* 2023/07 HM: This file generates the trace for a cluster-based python profiler to detect the data value commonality level in a program. 
+* This trace is load-only. It will write out rows of ['Index', 'PC', 'Data Addr', 'Data Value', 'Diff Source'] for each memory read. The Python script will then post-process the trace, find similar values and report the level of data value locality. 
+* "Diff Source" is used to detect silent stores. Note: ** This code only writes 1 when it sees a store to separate the case where daddr and val both match. If this is the first time the value is loaded, "Diff Source" will be 0 and the entry will still count as a different source. This is handled in the python script. 
+*/
+
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -14,7 +20,6 @@
 #include <string.h>
 #include <unordered_map>
 #include "pin.H"
-#include <atomic>
 using std::cerr;
 using std::dec;
 using std::endl;
@@ -25,28 +30,34 @@ using std::string;
 
 ofstream OutFile;
 ofstream ByteFile;
+ofstream debugfile;
 bool going = false;
-UINT64 instrCount = 0;
 bool write_out_trace = false;
 bool print = true;
 // bool print_ins = false;
-// int interval = 100000000;
-//output actual load inst count for revisiting purpose 
+// this is RTN-aware instruction count regardless of skips
+UINT64 instrCount = 0;
+// this is global instruction count regardless of skips and RTNs
 UINT64 progInstrCount = 0;
+// this is the number of memory reads
+UINT64 memReadCount = 0;
 bool print_progInstrCount = false;
 // This map will store the current value at each memory address
 // std::unordered_map<ADDRINT, UINT64> memValueMap;
 //for detecting silent store
 std::unordered_map<ADDRINT, char> last_operation;
 
-std::atomic<int> activeThreadCount(0);
-
 // Global storage for last write address and size
 // static VOID* lastWriteAddr;
 // static UINT32 lastWriteSize = 0;
 
-KNOB< string > KnobOutputFile(KNOB_MODE_WRITEONCE, "pintool", "o", "load_val_hex_print.out", "specify output file name");
-KNOB< string > KnobTraceFile(KNOB_MODE_WRITEONCE, "pintool", "trace", "trace", "specify trace name");
+KNOB< string > KnobOutputFile(KNOB_MODE_WRITEONCE, "pintool", "o", "invalid", "specify output file name");
+KNOB< string > KnobTraceFile(KNOB_MODE_WRITEONCE, "pintool", "trace", "invalid", "specify trace name - binary dump");
+// Whether to print out debug file
+KNOB<bool> KnobDebug(KNOB_MODE_WRITEONCE, "pintool", "d", "0", 
+        "Whether to print out debug info in another file");
+KNOB<std::string> KnobDebugFile(KNOB_MODE_WRITEONCE,  "pintool", "debug_file_name", "champsim.trace.debug", 
+        "specify file name for human-readable output for debugging");
 KNOB< string > rtn_name_to_parse(KNOB_MODE_WRITEONCE, "pintool", "rtn_name_to_parse", "", "Specify RTN name to parse; if none, will parse all RTNs");
 
 KNOB<UINT64> KnobSkipInstructions(KNOB_MODE_WRITEONCE, "pintool", "s", "0", "How many instructions to skip before tracing begins");
@@ -60,40 +71,33 @@ VOID Count(){
 
 BOOL ShouldWrite()
 {
-    if (going && (PIN_ThreadId() == 0)) {
+    if (going) {
         ++instrCount;
-        // if (instrCount % interval == 0){
-        //     // OutFile << dec << "Processing Instruction " << instrCount << "..." << endl;
-        //     ByteFile.close();
-        //     std::ostringstream filename;
-        //     filename << dec << KnobTraceFile.Value().c_str() << "_" << instrCount << "-" << (instrCount+interval);
-        //     ByteFile.open(filename.str());
-        // }
-    
-//   OutFile << dec << "count: " << instrCount << " " << KnobTraceInstructions.Value() << " " << KnobSkipInstructions.Value() << " " <<endl;
         UINT64 trace_count = KnobTraceInstructions.Value();
         UINT64 skip_count = KnobSkipInstructions.Value();
         UINT64 jump_count = KnobJumpInstructions.Value();
         UINT64 interval = KnobInterval.Value();
         // check that count does not exceed maximum traced instructions
-        if ((trace_count == 0) || (instrCount < (trace_count + skip_count))){
+        if ((trace_count == 0) || (progInstrCount < (trace_count + skip_count))){
             //check that count exceeds minimum traced instructions (skip phase)
-            if (instrCount >= skip_count){
+            if (progInstrCount >= skip_count){
                 //check that inst is not in the jump region: 
                 if ((interval + jump_count) == 0) return true;
-                if (((instrCount - skip_count) % (interval + jump_count)) < interval){
-                    if ((instrCount - skip_count) % (interval + jump_count) == 0){
-                        // OutFile << dec << "Processing Instruction " << instrCount << "..." << endl;
-                        
-                        OutFile.close();
-                        std::ostringstream outfilename;
-                        outfilename << dec << KnobOutputFile.Value().c_str() << "_" << instrCount << "-" << (instrCount+interval) << ".csv";
-                        OutFile.open(outfilename.str().c_str());
-
-                        ByteFile.close();
-                        std::ostringstream binfilename;
-                        binfilename << dec << KnobTraceFile.Value().c_str() << "_" << instrCount << "-" << (instrCount+interval);
-                        ByteFile.open(binfilename.str().c_str());
+                if (((progInstrCount - skip_count) % (interval + jump_count)) < interval){
+                    if ((progInstrCount - skip_count) % (interval + jump_count) == 0){
+                        // OutFile << dec << "Processing Instruction " << progInstrCount << "..." << endl;
+                        if (KnobOutputFile.Value() != "invalid"){
+                            OutFile.close();
+                            std::ostringstream outfilename;
+                            outfilename << dec << KnobOutputFile.Value().c_str() << "_" << progInstrCount << "-" << (progInstrCount+interval) << ".csv";
+                            OutFile.open(outfilename.str().c_str());
+                        }
+                        if (KnobTraceFile.Value() != "invalid"){
+                            ByteFile.close();
+                            std::ostringstream binfilename;
+                            binfilename << dec << KnobTraceFile.Value().c_str() << "_" << progInstrCount << "-" << (progInstrCount+interval);
+                            ByteFile.open(binfilename.str().c_str());
+                        }
                     }
                     return true;
                 }
@@ -102,8 +106,8 @@ BOOL ShouldWrite()
     }
     return false;
     //if use KnobTraceInstructions directly, does not work, don't know why
-    // if (trace_count == 0) return (instrCount > KnobSkipInstructions.Value());
-    // else return (instrCount > KnobSkipInstructions.Value()) && (instrCount <= (trace_count + KnobSkipInstructions.Value()));
+    // if (trace_count == 0) return (progInstrCount > KnobSkipInstructions.Value());
+    // else return (progInstrCount > KnobSkipInstructions.Value()) && (progInstrCount <= (trace_count + KnobSkipInstructions.Value()));
 }
 
 VOID docount_rtn(const string rtn_name_to_parse_str, const string rtn_name, ADDRINT rtn_addr) { 
@@ -124,10 +128,20 @@ VOID rtn_after(const string rtn_name_to_parse_str, const string rtn_name, ADDRIN
     }
 }
 
+/* ===================================================================== */
+// Debug: prints out instructions and verbose info
+/* ===================================================================== */
+void Debug(ADDRINT pc, const string ins_str)
+{
+    //add printing here 
+    debugfile << dec << "Ins Count: " << progInstrCount << " Mem Read Count: " << memReadCount << " " << hex << "PC: " << pc << " " << ins_str << endl;
+}
+
 VOID ReadContent(ADDRINT ins_addr, VOID* memread_addr, UINT32 memread_size, const string ins_str)
 {
-    if (going && (PIN_ThreadId() == 0)) {
-        // OutFile << "Thread ID: " << PIN_ThreadId() << endl;
+    if (going) {
+        //increment mem read count
+        memReadCount++;
         // if (print_progInstrCount) OutFile << dec << progInstrCount << endl;
         // UINT64 value = 0;
         // PIN_SafeCopy(&value, memread_addr, memread_size);
@@ -143,34 +157,36 @@ VOID ReadContent(ADDRINT ins_addr, VOID* memread_addr, UINT32 memread_size, cons
 
         UINT64 value = 0;
         size_t read_size = PIN_SafeCopy((VOID*)(&value), (VOID*)memread_addr, memread_size);
-        assert(read_size == (size_t)memread_size);
+        // assert(read_size == (size_t)memread_size);
+        if (read_size == (size_t)memread_size){
 
-        // Align with cache line size 
-        ADDRINT memread_addr1 = (ADDRINT)memread_addr - ((ADDRINT)memread_addr % 64);
+            // Align with cache line size 
+            ADDRINT memread_addr1 = (ADDRINT)memread_addr - ((ADDRINT)memread_addr % 64);
 
-        //check whether it's a load of different source
-        bool load_is_diff_source = true;
-        auto it = last_operation.find((ADDRINT)memread_addr1);
-        if (it != last_operation.end()){
-            if(it->second == 'R') {
-                load_is_diff_source = false;
+            //check whether it's a load of different source
+            bool load_is_diff_source = true;
+            auto it = last_operation.find((ADDRINT)memread_addr1);
+            if (it != last_operation.end()){
+                if(it->second == 'R') {
+                    load_is_diff_source = false;
+                }
             }
-        }
-        
-        // Write down current op = Read
-        last_operation[memread_addr1] = 'R';
+            
+            // Write down current op = Read
+            last_operation[memread_addr1] = 'R';
 
-        if (write_out_trace) ByteFile.write((char*)&value, 8);
-        // if (print) OutFile << "\tmemread_addr:  " << memread_addr << " memread_size: " << memread_size << " val: " << value << endl;
-        if (print) OutFile << dec << instrCount << ", " << (UINT64)ins_addr << ", " << (UINT64)memread_addr << ", " << value << ", " << load_is_diff_source << endl;
-        // OutFile << dec << value << endl;
+            if (write_out_trace) ByteFile.write((char*)&value, 8);
+            // if (print) OutFile << "\tmemread_addr:  " << memread_addr << " memread_size: " << memread_size << " val: " << value << endl;
+            if (print) OutFile << dec << memReadCount << ", " << (UINT64)ins_addr << ", " << (UINT64)memread_addr << ", " << value << ", " << load_is_diff_source << endl;
+            // OutFile << dec << value << endl;
+        }
         
     }
 }
 
 // Just record the memory address of the store - will check if it's silent store in the Python code 
 VOID RecordWriteAddr(ADDRINT memwrite_addr) {
-    if (going && (PIN_ThreadId() == 0)){
+    if (going){
         memwrite_addr = memwrite_addr - (memwrite_addr % 64);
         last_operation[memwrite_addr] = 'S';
     }
@@ -205,10 +221,10 @@ VOID Routine(RTN rtn, VOID* rtn_name_to_parse)
     // For each instruction of the routine
     for (INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins))
     {
+        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)Count, IARG_END);
         // Track memory read instructions that need to be written out
         if (INS_IsMemoryRead(ins) &&  (!INS_IsPrefetch(ins)) && (INS_Disassemble(ins).find("gather") == std::string::npos) && (INS_Opcode(ins) != XED_ICLASS_TILELOADD)){
             //count total read instructions 
-            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)Count, IARG_END);
             if ((rtn_name_to_parse_str == "") || (RTN_Name(rtn) == rtn_name_to_parse_str)){
                 //std::string instrString = INS_Disassemble(ins); 
                 //fprintf("%s: ", instrString.c_str());
@@ -227,7 +243,8 @@ VOID Routine(RTN rtn, VOID* rtn_name_to_parse)
         } 
         if (INS_IsMemoryWrite(ins) && (INS_Disassemble(ins).find("scatter") == std::string::npos) && (INS_Opcode(ins) != XED_ICLASS_TILESTORED) && INS_IsValidForIpointAfter(ins)) { // Mark silent stores
             if ((rtn_name_to_parse_str == "") || (RTN_Name(rtn) == rtn_name_to_parse_str)){
-                INS_InsertCall(ins,
+                INS_InsertIfCall(ins, IPOINT_BEFORE, (AFUNPTR)ShouldWrite, IARG_END);
+                INS_InsertThenCall(ins,
                     IPOINT_BEFORE,
                     (AFUNPTR)RecordWriteAddr,
                     IARG_MEMORYWRITE_EA,
@@ -241,6 +258,15 @@ VOID Routine(RTN rtn, VOID* rtn_name_to_parse)
         //     IARG_INST_PTR,
         //     IARG_END);
         // }
+
+        //Debug function that prints out instructions in a readable form
+        if (KnobDebug.Value()){
+            INS_InsertIfCall(ins, IPOINT_BEFORE, (AFUNPTR)ShouldWrite, IARG_END);
+            INS_InsertThenCall(ins, IPOINT_BEFORE, (AFUNPTR)Debug, 
+            IARG_INST_PTR,
+            IARG_PTR, new string(INS_Disassemble(ins)), //print out instruction string for debug
+            IARG_END);
+        }
     }
 
         // RTN_Close(rtn);
@@ -261,18 +287,6 @@ VOID Fini(INT32 code, VOID* v)
     {
         ByteFile.close();
     }
-}
-
-VOID ThreadStart(THREADID threadid, CONTEXT *ctxt, INT32 flags, VOID *v)
-{
-    activeThreadCount++;
-    std::cout << "Thread started: " << threadid << ", Total threads: " << activeThreadCount << std::endl;
-}
-
-VOID ThreadFini(THREADID threadid, const CONTEXT *ctxt, INT32 code, VOID *v)
-{
-    activeThreadCount--;
-    std::cout << "Thread ended: " << threadid << ", Total threads: " << activeThreadCount << std::endl;
 }
 
 /* ===================================================================== */
@@ -297,17 +311,23 @@ int main(int argc, char* argv[])
     PIN_InitSymbols();
     // Initialize pin
     if (PIN_Init(argc, argv)) return Usage();
-    // monitor how many threads
-    PIN_AddThreadStartFunction(ThreadStart, NULL);
-    PIN_AddThreadFiniFunction(ThreadFini, NULL);
     std::ostringstream outfilename;
     UINT64 actual_count = KnobSkipInstructions.Value();
-    outfilename << dec << KnobOutputFile.Value().c_str() << "_" << actual_count << "-" << (actual_count+KnobInterval.Value()) << ".csv";
-    OutFile.open(outfilename.str().c_str());
-    // OutFile.open(KnobOutputFile.Value().c_str());
-    std::ostringstream binfilename;
-    binfilename << dec << KnobTraceFile.Value().c_str() << "_" << actual_count << "-" << (actual_count+KnobInterval.Value());
-    ByteFile.open(binfilename.str().c_str());
+    // if output file is defined, write to output file
+    if (KnobOutputFile.Value() != "invalid") {
+        outfilename << dec << KnobOutputFile.Value().c_str() << "_" << actual_count << "-" << (actual_count+KnobInterval.Value()) << ".csv";
+        OutFile.open(outfilename.str().c_str());
+        // OutFile.open(KnobOutputFile.Value().c_str());
+    }
+    // if trace is defined (not needed for now), write to output file
+    if (KnobTraceFile.Value() != "invalid") {
+        std::ostringstream binfilename;
+        binfilename << dec << KnobTraceFile.Value().c_str() << "_" << actual_count << "-" << (actual_count+KnobInterval.Value());
+        ByteFile.open(binfilename.str().c_str());
+    }
+
+    //Debug file that writes out human-readable instructions
+    if (KnobDebug.Value()) {debugfile.open(KnobDebugFile.Value().c_str());}
 
     // Register Routine to be called to instrument rtn
     RTN_AddInstrumentFunction(Routine, &rtn_name_to_parse);
