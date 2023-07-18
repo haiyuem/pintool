@@ -1,0 +1,2 @@
+source/tools/readMemVal/obj-intel64/*.o
+source/tools/readMemVal/obj-intel64/*.so

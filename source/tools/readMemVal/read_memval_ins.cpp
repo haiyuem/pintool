@@ -30,6 +30,13 @@ VOID ReadContent(VOID* ip, VOID* memread_addr, UINT32 memread_size, const string
     OutFile << hex << "InsAddr: " << ip << "\tIns: " << s << "\tMemAddr: " << memread_addr << "\t Size: " << memread_size << "\tValue:" << (unsigned long long) value << endl;
 }
 
+VOID PrintIns(const string s, ADDRINT ins_addr)
+{
+    // count ++;
+    // if (count > 1000) return;
+    OutFile << "PC:" << ins_addr << "\tIns: " << s << endl;
+}
+
 VOID Routine(RTN rtn, VOID* rtn_name_to_parse)
 {
     KNOB< string >* rtn_name_to_parse_ptr = (KNOB< string >*)rtn_name_to_parse;
@@ -37,7 +44,7 @@ VOID Routine(RTN rtn, VOID* rtn_name_to_parse)
     // if (RTN_Name(rtn).find(".text") != std::string::npos){
     if ((rtn_name_to_parse_str == "") || (RTN_Name(rtn) == rtn_name_to_parse_str)){
         RTN_Open(rtn);
-        OutFile << hex << "RTN base addr: 0x" << RTN_Address(rtn) << "\t" << RTN_Name(rtn) << endl;
+        // OutFile << hex << "RTN base addr: 0x" << RTN_Address(rtn) << "\t" << RTN_Name(rtn) << endl;
         for (INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins)){
             if (INS_IsMemoryRead(ins))
             {
@@ -53,6 +60,15 @@ VOID Routine(RTN rtn, VOID* rtn_name_to_parse)
                             IARG_PTR, 
                             new string(INS_Disassemble(ins)),
                             IARG_END);
+            }
+            else {
+                INS_InsertCall(ins, 
+                IPOINT_BEFORE,
+                AFUNPTR(PrintIns),
+                IARG_PTR, new string(INS_Disassemble(ins)), //ins string
+                IARG_INST_PTR, //ins addr
+                IARG_END
+                );
             }
         }
         RTN_Close(rtn);

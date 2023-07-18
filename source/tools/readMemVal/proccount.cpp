@@ -21,112 +21,153 @@ using std::ofstream;
 using std::setw;
 using std::string;
 
-ofstream outFile;
+ofstream OutFile;
+bool going = false;
 
-static UINT64 _tabInsCount[0x1000];
-static string _tabStr[0x1000];
-static UINT64 _tabInsAddr[0x1000];
-static UINT64 _firstInsAddr;
+// Holds instruction count for a single procedure
+typedef struct RtnCount
+{
+    string _name;
+    string _image;
+    string _sec;
+    ADDRINT _address;
+    RTN _rtn;
+    UINT64 _rtnCount;
+    UINT64 _icount;
+    struct RtnCount* _next;
+} RTN_COUNT;
 
-// // Holds instruction count for a single procedure
-// typedef struct RtnCount
-// {
-//     string _name;
-//     string _image;
-//     ADDRINT _address;
-//     RTN _rtn;
-//     UINT64 _rtnCount;
-//     UINT64 _icount;
-//     struct RtnCount* _next;
-// } RTN_COUNT;
+// Linked list of instruction counts for each routine
+RTN_COUNT* RtnList = 0;
 
-// // Linked list of instruction counts for each routine
-// RTN_COUNT* RtnList = 0;
+VOID docount_rtn(UINT64* counter, const string rtn_name_to_parse_str, const string rtn_name, ADDRINT rtn_addr) { 
+    if (rtn_name_to_parse_str == rtn_name){
+        going = true;
+    }
+    if (going){
+        (*counter)++; 
+        OutFile << "RTN START addr: " << hex << rtn_addr << "\t" << rtn_name << endl;
+    }
+}
+
+VOID rtn_after(const string rtn_name_to_parse_str, const string rtn_name, ADDRINT rtn_addr) {
+    if (going){
+        OutFile << "RTN FINISH addr: " << hex << rtn_addr << "\t" << rtn_name << endl;
+    }
+    if (rtn_name_to_parse_str == rtn_name){
+        going = false;
+    }
+}
 
 // This function is called before every instruction is executed
-VOID docount(const string insDis, VOID* memaddr, UINT64 ip, const string op, VOID* rtnaddr, THREADID threadid) { 
-    unsigned long long offset = (unsigned long long)ip - (unsigned long long)rtnaddr;
-    _tabInsCount[offset] += 1;
-    _tabStr[offset] = insDis;
-    _tabInsAddr[offset] = ip;
-    // (*counter)++;
-    if (_firstInsAddr == 0) {
-        _firstInsAddr = ip;
-    }
-    if (ip == _firstInsAddr){
-        ADDRINT value;
-        PIN_SafeCopy(&value, memaddr, sizeof(ADDRINT));
-        outFile << hex << "InsAddr: " << ip << "\tCount: " << _tabInsCount[offset] << "\tLoadAddr: " << memaddr << "\tValue:" << value << "\tThread: " << threadid << endl;    
+VOID docount_ins(UINT64* counter, const string ins, ADDRINT ins_addr) {
+    if (going){
+        (*counter)++;
+        OutFile << "\tIns addr: " << hex << ins_addr << "\t" << ins << endl;
+    } 
+    
+}
+
+VOID ReadContent(UINT64* counter, ADDRINT ins_addr, VOID* memread_addr, UINT32 memread_size, const string ins)
+{
+    if (going) {
+        UINT64 value = 0;
+        PIN_SafeCopy(&value, memread_addr, memread_size);
+        OutFile << hex << "\tIns addr: " << ins_addr << "\t" << ins << "\tMemAddr: " << memread_addr << "\t Size: " << memread_size << "\tValue:" << (unsigned long long) value << endl;
     }
     
 }
 
-// const char* StripPath(const char* path)
-// {
-//     const char* file = strrchr(path, '/');
-//     if (file)
-//         return file + 1;
-//     else
-//         return path;
-// }
+const char* StripPath(const char* path)
+{
+    const char* file = strrchr(path, '/');
+    if (file)
+        return file + 1;
+    else
+        return path;
+}
 
 // Pin calls this function every time a new rtn is executed
-VOID Routine(RTN rtn, VOID* v)
+VOID Routine(RTN rtn, VOID* rtn_name_to_parse)
 {
-    if (RTN_Name(rtn).find("ATL_spNBmm_b1") != std::string::npos){
-        // // Allocate a counter for this routine
-        // RTN_COUNT* rc = new RTN_COUNT;
+    // Allocate a counter for this routine
+    RTN_COUNT* rc = new RTN_COUNT;
 
-        // // The RTN goes away when the image is unloaded, so save it now
-        // // because we need it in the fini
-        // rc->_name     = RTN_Name(rtn);
-        // rc->_image    = StripPath(IMG_Name(SEC_Img(RTN_Sec(rtn))).c_str());
-        // rc->_address  = RTN_Address(rtn);
-        // rc->_icount   = 0;
-        // rc->_rtnCount = 0;
+    // The RTN goes away when the image is unloaded, so save it now
+    // because we need it in the fini
+    rc->_name     = RTN_Name(rtn);
+    rc->_image    = StripPath(IMG_Name(SEC_Img(RTN_Sec(rtn))).c_str());
+    rc->_sec    = StripPath(SEC_Name(RTN_Sec(rtn)).c_str());
+    rc->_address  = RTN_Address(rtn);
+    rc->_icount   = 0;
+    rc->_rtnCount = 0;
 
-        // // Add to list of routines
-        // rc->_next = RtnList;
-        // RtnList   = rc;
+    // Add to list of routines
+    rc->_next = RtnList;
+    RtnList   = rc;
 
+    KNOB< string >* rtn_name_to_parse_ptr = (KNOB< string >*)rtn_name_to_parse;
+    string rtn_name_to_parse_str = rtn_name_to_parse_ptr->Value().c_str();
+    // if (RTN_Name(rtn).find(".text") != std::string::npos){
+    // if ((rtn_name_to_parse_str == "") || (RTN_Name(rtn) == rtn_name_to_parse_str)){ 
         RTN_Open(rtn);
-        outFile << "RTN base addr: 0x" << RTN_Address(rtn) << "\t" << RTN_Name(rtn) << endl;
 
         // Insert a call at the entry point of a routine to increment the call count
-        // RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)docount, IARG_PTR, &(rc->_rtnCount), IARG_END);
+        RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)docount_rtn, 
+        IARG_PTR, &(rc->_rtnCount), 
+        IARG_PTR, new string(rtn_name_to_parse_str),
+        IARG_PTR, new string(RTN_Name(rtn)),
+        IARG_ADDRINT, RTN_Address(rtn),
+        IARG_END);
+
+        RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR)rtn_after, 
+        IARG_PTR, new string(rtn_name_to_parse_str),
+        IARG_PTR, new string(RTN_Name(rtn)),
+        IARG_ADDRINT, RTN_Address(rtn),
+        IARG_END);
 
         // For each instruction of the routine
-        // for (INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins))
-        // {
-        //     // if (INS_IsMemoryRead(ins) && ((INS_Mnemonic(ins)=="MOVAPS") or (INS_Mnemonic(ins)=="MULPS"))){
-        //     if (INS_IsMemoryRead(ins) && ((INS_Mnemonic(ins)=="MULPS"))){
-        //         // Insert a call to docount to increment the instruction counter for this rtn
-        //         INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)docount, 
-        //         IARG_PTR, 
-        //         new string(INS_Disassemble(ins)),
-        //         IARG_MEMORYREAD_EA,
-        //         IARG_ADDRINT, INS_Address(ins),
-        //         IARG_PTR,
-        //         new string(INS_Mnemonic(ins)),
-        //         IARG_ADDRINT,
-        //         RTN_Address(rtn),
-        //         IARG_THREAD_ID,
-        //         IARG_END);
-        //     }
+        for (INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins))
+        {
+            // Insert a call to docount to increment the instruction counter for this rtn
+            if (INS_IsMemoryRead(ins)){
+                //std::string instrString = INS_Disassemble(ins); 
+                //fprintf("%s: ", instrString.c_str());
+                INS_InsertCall(ins,
+                            IPOINT_BEFORE,
+                            AFUNPTR(ReadContent),
+                            IARG_PTR, &(rc->_icount),
+                            IARG_INST_PTR,
+                            IARG_MEMORYREAD_EA,
+                            IARG_MEMORYREAD_SIZE, 
+                            //IARG_REG_VALUE,
+                            IARG_PTR, 
+                            new string(INS_Disassemble(ins)),
+                            IARG_END);
+            } else {
+                INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)docount_ins, 
+                IARG_PTR, &(rc->_icount), 
+                IARG_PTR, new string(INS_Disassemble(ins)),
+                IARG_INST_PTR,
+                IARG_END);
+            }
             
-        // }
+        }
 
         RTN_Close(rtn);
-    }
-
+    // }
 }
+
+KNOB< string > KnobOutputFile(KNOB_MODE_WRITEONCE, "pintool", "o", "proccount.out", "specify output file name");
+KNOB< string > rtn_name_to_parse(KNOB_MODE_WRITEONCE, "pintool", "rtn_name_to_parse", "", "Specify RTN name to parse; if none, will parse all RTNs");
 
 // This function is called when the application exits
 // It prints the name and count for each procedure
 VOID Fini(INT32 code, VOID* v)
 {
-    // outFile << setw(23) << "Procedure"
+    // OutFile << setw(23) << "Procedure"
     //         << " " << setw(15) << "Image"
+    //         << " " << setw(15) << "Sec"
     //         << " " << setw(18) << "Address"
     //         << " " << setw(12) << "Calls"
     //         << " " << setw(12) << "Instructions" << endl;
@@ -134,19 +175,9 @@ VOID Fini(INT32 code, VOID* v)
     // for (RTN_COUNT* rc = RtnList; rc; rc = rc->_next)
     // {
     //     if (rc->_icount > 0)
-    //         outFile << setw(23) << rc->_name << " " << setw(15) << rc->_image << " " << setw(18) << hex << rc->_address << dec
+    //         OutFile << setw(23) << rc->_name << " " << setw(15) << rc->_image << " " << setw(15) << rc->_sec << " " << setw(18) << hex << rc->_address << dec
     //                 << " " << setw(12) << rc->_rtnCount << " " << setw(12) << rc->_icount << endl;
     // }
-    outFile << "Addr\t\tOffset\tNumber\tDisass" << endl;
-    for (UINT32 i = 0; i < 1000; i++){
-        if (_tabInsCount[i])
-        outFile << hex << _tabInsAddr[i] << "\t" << i << "\t" << dec << _tabInsCount[i] << "\t" << _tabStr[i] << endl;
-    }
-    outFile << "#eof" << endl;
-    if (outFile.is_open())
-    {
-        outFile.close();
-    }
 }
 
 /* ===================================================================== */
@@ -169,14 +200,12 @@ int main(int argc, char* argv[])
 {
     // Initialize symbol table code, needed for rtn instrumentation
     PIN_InitSymbols();
-
-    outFile.open("proccount.out");
-
     // Initialize pin
     if (PIN_Init(argc, argv)) return Usage();
+    OutFile.open(KnobOutputFile.Value().c_str());
 
     // Register Routine to be called to instrument rtn
-    RTN_AddInstrumentFunction(Routine, 0);
+    RTN_AddInstrumentFunction(Routine, &rtn_name_to_parse);
 
     // Register Fini to be called when the application exits
     PIN_AddFiniFunction(Fini, 0);
