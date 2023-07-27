@@ -25,7 +25,7 @@
 #TEST_TOOL_ROOTS := inscount0 inscount1 inscount2 proccount imageload staticcount detach malloctrace \
 #                   malloc_mt inscount_tls stack-debugger pinatrace itrace isampling safecopy invocation countreps \
 #                   nonstatica
-TEST_TOOL_ROOTS := read_memval_ins print_ins_in_rtn rtn_global_inscount count_unique_ins write_out_trace write_out_trace_saved_for_lane_1017 same_ins_load_pattern load_val_binary_print load_val_hex_print load_addr_and_val_dec write_load_addr_val count_thread
+TEST_TOOL_ROOTS := read_memval_ins print_ins_in_rtn rtn_global_inscount count_unique_ins write_out_trace write_out_trace_saved_for_lane_1017 same_ins_load_pattern load_val_binary_print load_val_hex_print load_addr_and_val_dec write_load_addr_val count_thread gen_cluster_champsim_trace_MT gen_cluster_champsim_trace_T0
 
 # This defines the tests to be run that were not already defined in TEST_TOOL_ROOTS.
 TEST_ROOTS :=
