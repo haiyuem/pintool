@@ -103,6 +103,9 @@ KNOB<UINT64> KnobSkipInstructions(KNOB_MODE_WRITEONCE, "pintool", "s", "0",
 KNOB<UINT64> KnobTraceInstructions(KNOB_MODE_WRITEONCE, "pintool", "ti", "0", 
         "How many instructions to trace");
 
+//This option enables user to parse a specific RTN (function) with all its internal calls
+KNOB< string > rtn_name_to_parse(KNOB_MODE_WRITEONCE, "pintool", "rtn_name_to_parse", "", "Specify RTN name to parse; if none, will parse all RTNs");
+
 /* ===================================================================== */
 // Utilities
 /* ===================================================================== */
@@ -125,13 +128,33 @@ INT32 Usage()
 }
 
 /* ===================================================================== */
+// Routine tracker
+/* ===================================================================== */
+
+// ************* get rid of this for now because it will produce false instruction count - it will be half the instruction count compared to counting without selected_RTN. Don't know why...
+//keeps track of which instruction is written to the trace
+bool selected_RTN = false;
+
+VOID rtn_entry(const string rtn_name_to_parse_str, const string rtn_name, ADDRINT rtn_addr) { 
+    if ((rtn_name_to_parse_str == rtn_name) || (rtn_name_to_parse_str == "")){
+        selected_RTN = true;
+    }
+}
+
+VOID rtn_exit(const string rtn_name_to_parse_str, const string rtn_name, ADDRINT rtn_addr) {
+    if ((rtn_name_to_parse_str == rtn_name) && selected_RTN){
+        selected_RTN = false;
+    }
+}
+
+/* ===================================================================== */
 // Debug: prints out instructions and verbose info
 /* ===================================================================== */
 void Debug(ADDRINT pc, const string ins_str, BOOL is_memoryread)
 {
     if (should_write && (PIN_ThreadId() == 0)){
         stringstream message;
-        message << dec << " Ins Count: " << progInstrCount << " " << "Traced Ins Count: " << tracedInstrCount << " " << hex << "PC: " << pc << " " << ins_str ;
+        message << dec << " Ins Count: " << progInstrCount << " " << "RTN Ins Count: " << tracedInstrCount << " " << hex << "PC: " << pc << " " << ins_str ;
         if (should_write_memread) message << " Mem Count: " << dec << memReadCount;
         message << endl;
         for (unsigned int nth_reg=0; nth_reg<NUM_INSTR_SOURCES; nth_reg++){
@@ -148,7 +171,8 @@ void Debug(ADDRINT pc, const string ins_str, BOOL is_memoryread)
 //This is to count the number of ins
 VOID ShouldWrite(BOOL is_memoryread){
     // global count of the application, regardless of any limitation
-    if (PIN_ThreadId() == 0) {
+    // this only applies to traced instructions: defined by RTN and skip/traced inst #
+    if (selected_RTN && (PIN_ThreadId() == 0)) {
         should_write = false;
         should_write_memread = false;
         ++progInstrCount;
@@ -212,7 +236,11 @@ void WriteValToSet(unsigned char* begin, unsigned char* end, UINT32 r, CONTEXT* 
         *found_reg = r;
         //get index
         int nth_reg = std::distance(begin, found_reg);
-
+        // UINT8 regval[8];  // Buffer to hold register value
+        // PIN_GetContextRegval(ctxt, reg, regval);
+        // // Interpret the first 64 bits of the register value as a UINT64
+        // UINT64* val = reinterpret_cast<UINT64*>(regval);
+        // curr_instr.operand_vals[nth_reg] = *val;
         // Uses PINTOOL_REGISTER from util, can hold any reg size, can interpret with different sizes
         PINTOOL_REGISTER val;
         PIN_GetContextRegval(ctxt, reg, reinterpret_cast< UINT8* >(&val));
@@ -250,6 +278,7 @@ VOID ReadContent(ADDRINT ins_addr, VOID* memread_addr, UINT32 memread_size, cons
         ADDRINT memread_addr1 = (ADDRINT)memread_addr - ((ADDRINT)memread_addr % 64);
 
         //check whether it's a load of different source
+        //TODO: THIS SILENT STORE DETECTOR IS NOT THREAD SAFE!! If instructions are not executed in order 
         bool load_is_diff_source = true;
         
         auto it = last_operation.find((ADDRINT)memread_addr1);
@@ -278,108 +307,136 @@ VOID RecordWriteAddr(ADDRINT memwrite_addr) {
 /* ===================================================================== */
 
 // Is called for every instruction and instruments reads and writes
-// VOID Routine(RTN rtn, VOID* rtn_name_to_parse)
-VOID Instruction(INS ins, VOID* v)
+VOID Routine(RTN rtn, VOID* rtn_name_to_parse)
 {
-    // Count insts + check if this ins needed to be written
-    INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)ShouldWrite, IARG_BOOL, INS_IsMemoryRead(ins),IARG_END);
+    //setup RTN name to parse
+    KNOB< string >* rtn_name_to_parse_ptr = (KNOB< string >*)rtn_name_to_parse;
+    string rtn_name_to_parse_str = rtn_name_to_parse_ptr->Value().c_str();
 
-    INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)ResetCurrentInstruction, IARG_INST_PTR, IARG_END);
+    RTN_Open(rtn);
 
-    // instrument branch instructions
-    // TODO: temporarily exclude xbegin/xend instructions since IARG_BRANCH_TAKEN currently doesn't support that
-    if(INS_IsBranch(ins) && (INS_Disassemble(ins).find("xend") == string::npos) && (INS_Disassemble(ins).find("xbegin") == string::npos)){
-        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)BranchOrNot, IARG_BRANCH_TAKEN, IARG_END);
-    }
+    //for specific RTN, or for all RTNs (the entire program) if rtn_name_to_parse == ""
+    // cannot filter rtn here because it might filter out unmatched sub-RTNs within matched RTNs
+     
+    // Insert a call at the entry and exit point of a routine to keep track of routine
+    RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)rtn_entry, 
+    IARG_PTR, new string(rtn_name_to_parse_str),
+    IARG_PTR, new string(RTN_Name(rtn)),
+    IARG_ADDRINT, RTN_Address(rtn),
+    IARG_END);
 
-    // instrument register reads
-    UINT32 readRegCount = INS_MaxNumRRegs(ins);
-    for(UINT32 i=0; i<readRegCount; i++) 
-    {
-        UINT32 regNum = INS_RegR(ins, i);
-        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteValToSet,
-            IARG_PTR, curr_instr.source_registers, IARG_PTR, curr_instr.source_registers + NUM_INSTR_SOURCES,
-            IARG_UINT32, regNum, 
-            IARG_CONTEXT,
-            IARG_ADDRINT, regNum,
-            IARG_END);
-    }
+    RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR)rtn_exit, 
+    IARG_PTR, new string(rtn_name_to_parse_str),
+    IARG_PTR, new string(RTN_Name(rtn)),
+    IARG_ADDRINT, RTN_Address(rtn),
+    IARG_END);
 
-    // instrument register writes
-    UINT32 writeRegCount = INS_MaxNumWRegs(ins);
-    for(UINT32 i=0; i<writeRegCount; i++) 
-    {
-        UINT32 regNum = INS_RegW(ins, i);
-        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteValToSet,
-            IARG_PTR, curr_instr.destination_registers, IARG_PTR, curr_instr.destination_registers + NUM_INSTR_DESTINATIONS,
-            IARG_UINT32, regNum, 
-            IARG_CONTEXT,
-            IARG_ADDRINT, regNum,
-            IARG_END);
-    }
+    for (INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins)){
+        // Count insts + check if this ins needed to be written
+        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)ShouldWrite, IARG_BOOL, INS_IsMemoryRead(ins),IARG_END);
 
-    // instrument immediate values
-    INT32 opcount = INS_OperandCount(ins);
-    for (INT32 i = 0; i < opcount; i++){
-        if (INS_OperandIsImmediate(ins, i)){
-            // ADDRINT value     = INS_OperandImmediate(ins, i);
-            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteImmediate,
-                IARG_UINT64, INS_OperandImmediate(ins, i),
+        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)ResetCurrentInstruction, IARG_INST_PTR, IARG_END);
+
+        // instrument branch instructions
+        // TODO: temporarily exclude xbegin/xend instructions since IARG_BRANCH_TAKEN currently doesn't support that
+        if(INS_IsBranch(ins) && (INS_Disassemble(ins).find("xend") == string::npos) && (INS_Disassemble(ins).find("xbegin") == string::npos)){
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)BranchOrNot, IARG_BRANCH_TAKEN, IARG_END);
+        }
+
+        // instrument register reads
+        UINT32 readRegCount = INS_MaxNumRRegs(ins);
+        for(UINT32 i=0; i<readRegCount; i++) 
+        {
+            UINT32 regNum = INS_RegR(ins, i);
+            // if (REG_is_gr32((REG)regNum) || REG_is_gr64((REG)regNum) || REG_is_xmm((REG)regNum)){
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteValToSet,
+                IARG_PTR, curr_instr.source_registers, IARG_PTR, curr_instr.source_registers + NUM_INSTR_SOURCES,
+                IARG_UINT32, regNum, 
+                IARG_CONTEXT,
+                IARG_ADDRINT, regNum,
+                IARG_END);
+            // }
+        }
+
+        // instrument register writes
+        UINT32 writeRegCount = INS_MaxNumWRegs(ins);
+        for(UINT32 i=0; i<writeRegCount; i++) 
+        {
+            UINT32 regNum = INS_RegW(ins, i);
+            // if (REG_is_gr32((REG)regNum) || REG_is_gr64((REG)regNum) || REG_is_xmm((REG)regNum)){
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteValToSet,
+                IARG_PTR, curr_instr.destination_registers, IARG_PTR, curr_instr.destination_registers + NUM_INSTR_DESTINATIONS,
+                IARG_UINT32, regNum, 
+                IARG_CONTEXT,
+                IARG_ADDRINT, regNum,
+                IARG_END);
+            // }
+        }
+
+        // instrument immediate values
+        INT32 opcount = INS_OperandCount(ins);
+        for (INT32 i = 0; i < opcount; i++){
+            if (INS_OperandIsImmediate(ins, i)){
+                // ADDRINT value     = INS_OperandImmediate(ins, i);
+                INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteImmediate,
+                    IARG_UINT64, INS_OperandImmediate(ins, i),
+                    IARG_END);
+            }
+        }
+
+        // instrument memory reads and writes
+        UINT32 memOperands = INS_MemoryOperandCount(ins);
+
+        // Iterate over each memory operand of the instruction.
+        for (UINT32 memOp = 0; memOp < memOperands; memOp++) 
+        {
+            if (INS_MemoryOperandIsRead(ins, memOp)) {
+                INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteToSet,
+                    IARG_PTR, curr_instr.source_memory, IARG_PTR, curr_instr.source_memory + NUM_INSTR_SOURCES,
+                    IARG_MEMORYOP_EA, memOp, IARG_END);
+            }
+            if (INS_MemoryOperandIsWritten(ins, memOp)) {
+                INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteToSet,
+                    IARG_PTR, curr_instr.destination_memory, IARG_PTR, curr_instr.destination_memory + NUM_INSTR_DESTINATIONS,
+                    IARG_MEMORYOP_EA, memOp, IARG_END);
+            }
+        }
+
+        // finalize each instruction with this function
+        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteCurrentInstruction, IARG_END);
+
+        // ++++++++++++++++++++++++++++++++++++++++++
+        // gen cluster trace: 
+        if (INS_IsMemoryRead(ins) && (!INS_IsPrefetch(ins)) && (INS_Disassemble(ins).find("gather") == std::string::npos) && (INS_Opcode(ins) != XED_ICLASS_TILELOADD)){
+            INS_InsertCall(ins,
+                IPOINT_BEFORE,
+                AFUNPTR(ReadContent),
+                IARG_INST_PTR,
+                IARG_MEMORYREAD_EA,
+                IARG_MEMORYREAD_SIZE, 
+                //IARG_REG_VALUE,
+                IARG_PTR, new string(INS_Disassemble(ins)),
+                IARG_END);
+        } 
+        if (INS_IsMemoryWrite(ins) && (INS_Disassemble(ins).find("scatter") == std::string::npos) && (INS_Opcode(ins) != XED_ICLASS_TILESTORED) && INS_IsValidForIpointAfter(ins)) { // Mark silent stores
+            INS_InsertCall(ins,
+                IPOINT_BEFORE,
+                (AFUNPTR)RecordWriteAddr,
+                IARG_MEMORYWRITE_EA,
                 IARG_END);
         }
-    }
-
-    // instrument memory reads and writes
-    UINT32 memOperands = INS_MemoryOperandCount(ins);
-
-    // Iterate over each memory operand of the instruction.
-    for (UINT32 memOp = 0; memOp < memOperands; memOp++) 
-    {
-        if (INS_MemoryOperandIsRead(ins, memOp)) {
-            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteToSet,
-                IARG_PTR, curr_instr.source_memory, IARG_PTR, curr_instr.source_memory + NUM_INSTR_SOURCES,
-                IARG_MEMORYOP_EA, memOp, IARG_END);
-        }
-        if (INS_MemoryOperandIsWritten(ins, memOp)) {
-            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteToSet,
-                IARG_PTR, curr_instr.destination_memory, IARG_PTR, curr_instr.destination_memory + NUM_INSTR_DESTINATIONS,
-                IARG_MEMORYOP_EA, memOp, IARG_END);
-        }
-    }
-
-    // finalize each instruction with this function
-    INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteCurrentInstruction, IARG_END);
-
-    // ++++++++++++++++++++++++++++++++++++++++++
-    // gen cluster trace: 
-    if (INS_IsMemoryRead(ins) && (!INS_IsPrefetch(ins)) && (INS_Disassemble(ins).find("gather") == std::string::npos) && (INS_Opcode(ins) != XED_ICLASS_TILELOADD)){
-        INS_InsertCall(ins,
-            IPOINT_BEFORE,
-            AFUNPTR(ReadContent),
+        // ++++++++++++++++++++++++++++++++++++++++++
+        
+        //Debug function that prints out instructions in a readable form
+        if (KnobDebug.Value()){
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)Debug, 
             IARG_INST_PTR,
-            IARG_MEMORYREAD_EA,
-            IARG_MEMORYREAD_SIZE, 
-            //IARG_REG_VALUE,
-            IARG_PTR, new string(INS_Disassemble(ins)),
+            IARG_PTR, new string(INS_Disassemble(ins)), //print out instruction string for debug
+            IARG_BOOL, INS_IsMemoryRead(ins),
             IARG_END);
-    } 
-    if (INS_IsMemoryWrite(ins) && (INS_Disassemble(ins).find("scatter") == std::string::npos) && (INS_Opcode(ins) != XED_ICLASS_TILESTORED) && INS_IsValidForIpointAfter(ins)) { // Mark silent stores
-        INS_InsertCall(ins,
-            IPOINT_BEFORE,
-            (AFUNPTR)RecordWriteAddr,
-            IARG_MEMORYWRITE_EA,
-            IARG_END);
+        }
     }
-    // ++++++++++++++++++++++++++++++++++++++++++
-    
-    //Debug function that prints out instructions in a readable form
-    if (KnobDebug.Value()){
-        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)Debug, 
-        IARG_INST_PTR,
-        IARG_PTR, new string(INS_Disassemble(ins)), //print out instruction string for debug
-        IARG_BOOL, INS_IsMemoryRead(ins),
-        IARG_END);
-    }      
+    RTN_Close(rtn); 
 }
 
 
@@ -432,7 +489,7 @@ int main(int argc, char *argv[])
     if (KnobDebug.Value()) {debugfile.open(KnobDebugFile.Value().c_str());}
 
     // Register Routine to be called to instrument rtn
-    INS_AddInstrumentFunction(Instruction, 0);
+    RTN_AddInstrumentFunction(Routine, &rtn_name_to_parse);
 
     // Register function to be called when the application exits
     PIN_AddFiniFunction(Fini, 0);
