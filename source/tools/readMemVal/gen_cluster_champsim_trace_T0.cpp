@@ -75,7 +75,9 @@ unordered_map<ADDRINT, char> last_operation;
 // gen 2 traces: champsim trace and cluster trace
 ofstream champsim_outfile;
 ofstream cluster_outfile;
-ofstream operand_val_outfile;
+ofstream operand_val_outfile16;
+ofstream operand_val_outfile32;
+ofstream operand_val_outfile64;
 ofstream debugfile;
 
 int numThreads = 0;
@@ -230,8 +232,8 @@ void WriteCurrentInstruction()
             // Create a buffer to hold all the data.
             char buffer[sizeof(tracedInstrCount) + sizeof(curr_instr.ip) 
                         + sizeof(curr_instr.source_registers[0]) 
-                        + sizeof(curr_instr.operand_vals[0]) 
-                        + sizeof(reg_width)];
+                        + sizeof(curr_instr.operand_vals[0]) ];
+                        // + sizeof(reg_width)];
 
             // Use memcpy to copy data to the buffer.
             char* dest = buffer;
@@ -248,17 +250,24 @@ void WriteCurrentInstruction()
             memcpy(dest, &(curr_instr.operand_vals[0]), sizeof(curr_instr.operand_vals[0]));
             dest += sizeof(curr_instr.operand_vals[0]);
 
-            memcpy(dest, &reg_width, sizeof(reg_width));
-            dest += sizeof(reg_width);
+            // memcpy(dest, &reg_width, sizeof(reg_width));
+            // dest += sizeof(reg_width);
 
             // Write the buffer to the file in one call.
-            operand_val_outfile.write(buffer, sizeof(buffer));
+            // operand_val_outfile.write(buffer, sizeof(buffer));
+
+            //Short cut: write 3 files for <=16bit, 32 bit, and >=64bit. Need to make the code better afterwards
+            if ((reg_width == REGWIDTH_8) || (reg_width == REGWIDTH_16 ))operand_val_outfile16.write(buffer, sizeof(buffer));
+            else if (reg_width == REGWIDTH_32) operand_val_outfile32.write(buffer, sizeof(buffer));
+            else operand_val_outfile64.write(buffer, sizeof(buffer));
 
             // operand_val_outfile.write((char*)(&tracedInstrCount), sizeof(tracedInstrCount));
             // operand_val_outfile.write((char*)(&(curr_instr.ip)), sizeof(curr_instr.ip));
             // operand_val_outfile.write((char*)(&(curr_instr.source_registers[0])), sizeof(curr_instr.source_registers[0]));
             // operand_val_outfile.write((char*)(&(curr_instr.operand_vals[0])), sizeof(curr_instr.operand_vals[0]));
             // operand_val_outfile.write((char*)(&reg_width), sizeof(reg_width));
+
+            // operand_val_outfile << dec << tracedInstrCount << ", " << (UINT64)(curr_instr.ip) << ", " << (UINT64)(curr_instr.source_registers[0]) << ", " << (UINT64)(curr_instr.operand_vals[0]) << ", " << (int)reg_width << endl;
         }
     }
 }
@@ -483,7 +492,9 @@ VOID Fini(INT32 code, VOID *v)
 
     if (champsim_outfile.is_open()) champsim_outfile.close();
     if (cluster_outfile.is_open()) cluster_outfile.close();
-    if (operand_val_outfile.is_open()) operand_val_outfile.close();
+    if (operand_val_outfile16.is_open()) operand_val_outfile16.close();
+    if (operand_val_outfile32.is_open()) operand_val_outfile32.close();
+    if (operand_val_outfile64.is_open()) operand_val_outfile64.close();
     if (debugfile.is_open()) debugfile.close();
 }
 
@@ -517,12 +528,24 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    operand_val_outfile.open(KnobOperandOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
-    if (!operand_val_outfile)
-    {
-      cout << "Couldn't open Cluster output trace file. Exiting." << endl;
-        exit(1);
-    }
+    std::ostringstream opfilename1;
+    opfilename1 << dec << KnobOperandOutputFile.Value().c_str() << "_16bit";
+    operand_val_outfile16.open(opfilename1.str().c_str());
+    std::ostringstream opfilename2;
+    opfilename2 << dec << KnobOperandOutputFile.Value().c_str() << "_32bit";
+    operand_val_outfile32.open(opfilename2.str().c_str());
+    std::ostringstream opfilename3;
+    opfilename3 << dec << KnobOperandOutputFile.Value().c_str() << "_64bit";
+    operand_val_outfile64.open(opfilename3.str().c_str());
+
+    // operand_val_outfile.open(KnobOperandOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
+    // if (!operand_val_outfile)
+    // {
+    //   cout << "Couldn't open Operand Val output trace file. Exiting." << endl;
+    //     exit(1);
+    // }
+
+    
 
     //Debug file that writes out human-readable instructions
     if (KnobDebug.Value()) {debugfile.open(KnobDebugFile.Value().c_str());}
