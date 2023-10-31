@@ -57,7 +57,7 @@
 #include <cstring>
 #include <sstream>
 
-#include "/home/haiyue/research/data_commonality/champsim-datacomm/inc/trace_instruction.h"
+#include "/scratch/gpfs/hm2595/champsim-datacomm/inc/trace_instruction.h"
 
 using namespace std;
 
@@ -107,17 +107,17 @@ UINT32 reg_sizeabove64_counter = 0;
 /* ===================================================================== */
 // Command line switches
 /* ===================================================================== */
-KNOB<string> KnobChampSimOutputFile(KNOB_MODE_WRITEONCE,  "pintool", "champsim_trace_output", "champsim.trace", 
+KNOB<string> KnobSchedulerOutputFile(KNOB_MODE_WRITEONCE,  "pintool", "scheduler_trace_output", "scheduler.trace", 
         "specify file name for Champsim tracer output");
-KNOB<string> KnobClusterOutputFile(KNOB_MODE_WRITEONCE,  "pintool", "cluster_trace_output", "cluster.trace", 
+KNOB<string> KnobLoadValOutputFile(KNOB_MODE_WRITEONCE,  "pintool", "profiler_loadval_trace_output", "profiler_loadval.trace", 
         "specify file name for Cluster tracer output");
-KNOB<string> KnobOperandOutputFile(KNOB_MODE_WRITEONCE,  "pintool", "operand_val_trace_output", "operand_val.trace", 
+KNOB<string> KnobOperandValOutputFile(KNOB_MODE_WRITEONCE,  "pintool", "profiler_operandval_trace_output", "profiler_operandval.trace", 
         "specify file name for operand val tracer output");
 
 // Whether to print out debug file
 KNOB<bool> KnobDebug(KNOB_MODE_WRITEONCE, "pintool", "d", "0", 
         "Whether to print out debug info in another file");
-KNOB<string> KnobDebugFile(KNOB_MODE_WRITEONCE,  "pintool", "debug_file_name", "champsim.trace.debug", 
+KNOB<string> KnobDebugFile(KNOB_MODE_WRITEONCE,  "pintool", "debug_file_name", "trace.debug", 
         "specify file name for Champsim tracer human-readable output for debugging");
 
 // TODO: merge cluster_gen's interval and jump mechanisms here
@@ -288,14 +288,16 @@ void WriteValToSet(unsigned char* begin, unsigned char* end, UINT32 r, CONTEXT* 
     if (should_write && (PIN_ThreadId() == 0)){
         auto set_end = std::find(begin, end, 0);
         auto found_reg = std::find(begin, set_end, r); // check to see if this register is already in the list
-        *found_reg = r;
-        //get index
+        // If the register is not found in the list, insert it
         int nth_reg = std::distance(begin, found_reg);
+        if (curr_instr.operand_vals[nth_reg] == 0xdeadbeefdeadbeef) { //don't overwrite; overwrites are from flags and not what we want
+            *found_reg = r;
 
-        // Uses PINTOOL_REGISTER from util, can hold any reg size, can interpret with different sizes
-        PINTOOL_REGISTER val;
-        PIN_GetContextRegval(ctxt, reg, reinterpret_cast< UINT8* >(&val));
-        curr_instr.operand_vals[nth_reg] = val.qword[0];
+            // Uses PINTOOL_REGISTER from util, can hold any reg size, can interpret with different sizes
+            PINTOOL_REGISTER val;
+            PIN_GetContextRegval(ctxt, reg, reinterpret_cast< UINT8* >(&val));
+            curr_instr.operand_vals[nth_reg] = val.qword[0];
+        }
     }
 }
 
@@ -384,13 +386,16 @@ VOID Instruction(INS ins, VOID* v)
     UINT32 readRegCount = INS_MaxNumRRegs(ins);
     for(UINT32 i=0; i<readRegCount; i++) 
     {
-        UINT32 regNum = INS_RegR(ins, i);
-        INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteValToSet,
+        
+        if (!REG_is_flags(INS_RegR(ins, i))){
+            UINT32 regNum = INS_RegR(ins, i);
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteValToSet,
             IARG_PTR, curr_instr.source_registers, IARG_PTR, curr_instr.source_registers + NUM_INSTR_SOURCES,
             IARG_UINT32, regNum, 
             IARG_CONTEXT,
             IARG_ADDRINT, regNum,
             IARG_END);
+        }
     }
 
     // instrument register writes
@@ -515,13 +520,13 @@ int main(int argc, char *argv[])
         return Usage();
 
     // open 2 trace files
-    champsim_outfile.open(KnobChampSimOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
+    champsim_outfile.open(KnobSchedulerOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
     if (!champsim_outfile)
     {
       cout << "Couldn't open ChampSim output trace file. Exiting." << endl;
         exit(1);
     }
-    cluster_outfile.open(KnobClusterOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
+    cluster_outfile.open(KnobLoadValOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
     if (!cluster_outfile)
     {
       cout << "Couldn't open Cluster output trace file. Exiting." << endl;
@@ -529,16 +534,16 @@ int main(int argc, char *argv[])
     }
 
     std::ostringstream opfilename1;
-    opfilename1 << dec << KnobOperandOutputFile.Value().c_str() << "_16bit";
+    opfilename1 << dec << KnobOperandValOutputFile.Value().c_str() << "_16bit";
     operand_val_outfile16.open(opfilename1.str().c_str());
     std::ostringstream opfilename2;
-    opfilename2 << dec << KnobOperandOutputFile.Value().c_str() << "_32bit";
+    opfilename2 << dec << KnobOperandValOutputFile.Value().c_str() << "_32bit";
     operand_val_outfile32.open(opfilename2.str().c_str());
     std::ostringstream opfilename3;
-    opfilename3 << dec << KnobOperandOutputFile.Value().c_str() << "_64bit";
+    opfilename3 << dec << KnobOperandValOutputFile.Value().c_str() << "_64bit";
     operand_val_outfile64.open(opfilename3.str().c_str());
 
-    // operand_val_outfile.open(KnobOperandOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
+    // operand_val_outfile.open(KnobOperandValOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
     // if (!operand_val_outfile)
     // {
     //   cout << "Couldn't open Operand Val output trace file. Exiting." << endl;
