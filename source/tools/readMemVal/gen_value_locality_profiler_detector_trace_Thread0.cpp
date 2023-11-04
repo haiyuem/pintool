@@ -14,19 +14,21 @@
  * limitations under the License.
  */
 
-/*! @file
- *  This is an example of the PIN tool that demonstrates some basic PIN APIs 
- *  and could serve as the starting point for developing your first PIN tool
+/*! @gen_value_locality_profiler_detector_trace_Thread0
+ *  This file generates:
+ *  1) a trace of all memory accesses and their values "loadval" for the Value Locality Profiler; both .csv (human-readble) and .trace (binary) formats
+ *  2) a trace of all non-memory operands and their values "operandval" for the Value Locality Profiler; both .csv (human-readble) and .trace (binary) formats
+ *  3) a trace of all instructions for the ChampSim simulator. (*scheduler.trace)
+ *  4) a debug file that prints out human friendly info of each instruction. (*trace.debug)
  */
 
+/*******************************Change Logs**********************************/
 /*
  * 05/04/2023 HM: Add support to dump specific RTN and all the instructions called within the RTN 
  * Add support to write operand values for each instruction into trace 
  * Trace format: [original instruction][op1(64bit)][op2(64bit)][op3(64bit)][op4(64bit)]
  * value=0xdeadbeef means it's not a valid operand
- */
-
-/*
+ *
  * 07/06/2023 HM: Fixed issue for reading value, now reads all instruction's operand values (max 4)
  * Differentiated regular 64-bits operands and xmm reg operands (4*32-bit single-precision FP), but still uses (first) 64 bits for now, need to change 
  * TODO: 1) separate regular and xmm operands  2) include mem load/store values (need to add a field in champsim)
@@ -42,6 +44,8 @@
  * 07/26/2023 HM: Change this file to single thread (only track T0) to speed up for single thread apps
 
  * 08/04/2023 HM: Differentiate different sizes of mem loads and non-mem operands, output the size for pie-chart and type-specific value locality detection
+
+ * 11/03/2023 HM: Restruture the code, generate .csv and binary traces simultaneously, add feature of tracing unique operand values, hide output file for different operand value types (can be enabled with command line options)
 */
 
 #include "pin.H"
@@ -56,6 +60,9 @@
 
 #include <cstring>
 #include <sstream>
+#include <array>
+#include <fstream>
+#include <string>
 
 #include "/scratch/gpfs/hm2595/champsim-datacomm/inc/trace_instruction.h"
 
@@ -70,49 +77,51 @@ atomic<int> activeThreadCount(0);
 /* ================================================================== */
 
 // This map stores what operation it is for the last access of the mem address, for detecting silent store
-unordered_map<ADDRINT, char> last_operation;
+unordered_map<ADDRINT, char> memaddr_last_operation;
+unordered_map<REG, char> reg_last_operation;
 
-// gen 2 traces: champsim trace and cluster trace
-ofstream champsim_outfile;
-ofstream cluster_outfile;
-ofstream operand_val_outfile16;
-ofstream operand_val_outfile32;
-ofstream operand_val_outfile64;
-ofstream debugfile;
+// gen 3 traces: loadval/operandval_outfile to be processed by the Python value locality profiler, scheduler_outfile to be processed in champsim (hardware scheduler)
+const size_t TRACE_SUFFIXES_SIZE = 2;
+const size_t TRACE_DIFFSIZE_SUFFIXES_SIZE = 5;
 
-int numThreads = 0;
-UINT64 progInstrCount;
-UINT64 tracedInstrCount;
-UINT64 memReadCount;
+ofstream scheduler_outfile;
+string trace_suffixes[2] = {"", ".csv"};
+ofstream loadval_outfiles[2]; 
+ofstream operandval_outfiles[2];
+ofstream debugfile; //debug file that prints out the instructions in a human-readable form
+
+// separate output files for different data types of operand values. Off by default, need to add command line option (-op_type) to enable
+string trace_diffsize_suffixes[5] = {"_8bit", "_16bit", "_32bit", "_64bit", "_above64bit"}; 
+ofstream operandval_outfiles_diffsize[5]; 
+
+// count the number of instructions
+UINT64 progInstrCount; // global count of the application, regardless of any limitation
+UINT64 tracedInstrCount; // count of the instructions that are traced
+UINT64 memReadCount; // count of the memory reads that are traced
+
 trace_instr_format_t curr_instr;
 bool should_write = false; // Whether this instruction needs to be written out
 bool should_write_memread = false; // only applies to mem reads; for cluster trace
 
-//mem read size counter 
-//this includes middle sizes: size 8 = size <=8bits, size 16 = 8 < size <= 16, etc
-UINT32 memread_size8_counter = 0;
-UINT32 memread_size16_counter = 0;
-UINT32 memread_size32_counter = 0;
-UINT32 memread_size64_counter = 0;
-UINT32 memread_sizeabove64_counter = 0;
+// memread size counter: this includes middle sizes: size 8 = size <=8bits, size 16 = 8 < size <= 16, etc
+UINT32 memread_size_counter[TRACE_DIFFSIZE_SUFFIXES_SIZE] = {0, 0, 0, 0, 0};
 
-
-//reg size counter: these are bits 
-UINT32 reg_size8_counter = 0;
-UINT32 reg_size16_counter = 0;
-UINT32 reg_size32_counter = 0;
-UINT32 reg_size64_counter = 0;
-UINT32 reg_sizeabove64_counter = 0;
+// reg size counter
+UINT32 reg_size_counter[TRACE_DIFFSIZE_SUFFIXES_SIZE] = {0, 0, 0, 0, 0};
 
 /* ===================================================================== */
 // Command line switches
 /* ===================================================================== */
 KNOB<string> KnobSchedulerOutputFile(KNOB_MODE_WRITEONCE,  "pintool", "scheduler_trace_output", "scheduler.trace", 
-        "specify file name for Champsim tracer output");
+        "specify file name for Champsim tracer output (to test the scheduler)");
 KNOB<string> KnobLoadValOutputFile(KNOB_MODE_WRITEONCE,  "pintool", "profiler_loadval_trace_output", "profiler_loadval.trace", 
-        "specify file name for Cluster tracer output");
+        "specify file name for load values tracer output");
 KNOB<string> KnobOperandValOutputFile(KNOB_MODE_WRITEONCE,  "pintool", "profiler_operandval_trace_output", "profiler_operandval.trace", 
-        "specify file name for operand val tracer output");
+        "specify file name for operand values tracer output");
+
+// Whether to print out individual data size operand val trace
+KNOB<bool> KnobOperandValDiffDataSizeOutput(KNOB_MODE_WRITEONCE, "pintool", "produce_individual_trace_for_data_size", "0", 
+        "Whether to print out individual data size operand val trace");
 
 // Whether to print out debug file
 KNOB<bool> KnobDebug(KNOB_MODE_WRITEONCE, "pintool", "d", "0", 
@@ -136,12 +145,15 @@ KNOB<UINT64> KnobTraceInstructions(KNOB_MODE_WRITEONCE, "pintool", "ti", "0",
 INT32 Usage()
 {
     cerr << "This tool creates a register and memory access trace" << endl 
-        << "Specify the ChampSim output trace file with -champsim_trace_output" << endl 
-        << "Specify the Cluster output trace file with -cluster_trace_output" << endl 
-        << "Specify the Operand val output trace file with -operand_val_trace_output" << endl 
+        << "Specify the ChampSim output trace file (for scheduler) with -champsim_trace_output" << endl 
+        << "Specify the load values output trace file with -cluster_trace_output" << endl 
+        << "Specify the operand values output trace file with -operand_val_trace_output" << endl 
+        << "Specify whether to print out individual data size operand val trace with -produce_individual_trace_for_data_size" << endl
+        << "Specify whether to print out to print out debug info in another file with -d" << endl
+        << "Specify the debug file name with -debug_file_name" << endl
         << "Specify the number of instructions to skip before tracing with -s" << endl
         << "Specify the number of instructions to trace with -t; default = 0 means no upper limit" << endl 
-        << "Specify the RTN name to parse with -rtn_name_to_parse" << endl
+        // << "Specify the RTN name to parse with -rtn_name_to_parse" << endl
         << endl;
 
     cerr << KNOB_BASE::StringKnobSummary() << endl;
@@ -208,66 +220,92 @@ void ResetCurrentInstruction(VOID *ip)
     }
 }
 
+// Processes the operand values of the current instruction and writes it to the trace file
 void WriteCurrentInstruction()
 {
+    // Note: this function now writes out operand value traces for all instructions, including memory reads. In ChampSim, mem reads are not processed in the same way as other instructions, and only the non-memory operand values are used. However in many pipelines operand values of mem reads should also go through ALU so they need to be included.
+    // TODO: Still need to debate whether we should take memory reads outside the traces. 
     if (should_write && (PIN_ThreadId() == 0)){
-        typename decltype(champsim_outfile)::char_type buf[sizeof(trace_instr_format_t)];
+        // write scheduler output file for champsim
+        typename decltype(scheduler_outfile)::char_type buf[sizeof(trace_instr_format_t)];
         memcpy(buf, &(curr_instr), sizeof(trace_instr_format_t));
-        champsim_outfile.write(buf, sizeof(trace_instr_format_t)); 
+        scheduler_outfile.write(buf, sizeof(trace_instr_format_t)); 
 
-        // write operand val trace for moving signature 
-        //['Index', 'PC', 'Reg Name'(not important), 'Data Value', 'Reg Width']
+        // update operand value Read/Store history map, and update if the first operand is from a different source
+        bool op_is_diff_source = true;
+        for (unsigned int nth_reg=0; nth_reg<NUM_INSTR_SOURCES; nth_reg++){
+            REG r = (REG)(curr_instr.source_registers[nth_reg]);
+            if (REG_valid(r)){
+                auto it = reg_last_operation.find(r);
+                if ((nth_reg == 0) && (it != reg_last_operation.end()) && (it->second == 'R')) {
+                    op_is_diff_source = false;
+                }
+                reg_last_operation[r] = 'R';
+            }
+        }
+        for (unsigned int nth_reg=0; nth_reg<NUM_INSTR_DESTINATIONS; nth_reg++){
+            REG r = (REG)(curr_instr.destination_registers[nth_reg]);
+            if (REG_valid(r)){
+                reg_last_operation[r] = 'S';
+            }
+        }
+
+
+        // write operand val trace for hardware detector
+        //['Index', 'PC', 'Reg Name'(not important), 'Data Value', 'Is Unique', 'Reg Width']
         // only print when the first read reg exists
         if ((REG)(curr_instr.source_registers[0]) != REG_INVALID()){
             //count different types of reg size 
             UINT8 reg_width = REG_Width((REG)(curr_instr.source_registers[0]));
-            if (reg_width == REGWIDTH_8 ) reg_size8_counter++;
-            else if (reg_width == REGWIDTH_16 ) reg_size16_counter++;
-            else if (reg_width == REGWIDTH_32 ) reg_size32_counter++;
-            else if (reg_width == REGWIDTH_64 ) reg_size64_counter++;
-            else reg_sizeabove64_counter++;
+            if (reg_width == REGWIDTH_8 ) reg_size_counter[0]++;
+            else if (reg_width == REGWIDTH_16 ) reg_size_counter[1]++;
+            else if (reg_width == REGWIDTH_32 ) reg_size_counter[2]++;
+            else if (reg_width == REGWIDTH_64 ) reg_size_counter[3]++;
+            else reg_size_counter[4]++;
 
-            // write operand val trace
-            // size of each element in bytes: 8, 8, 1, 8, 1
+            // write operand val, only take the first 64 bits of the first one for now
+            // size of each element in bytes: 8, 8, 1, 8, 1, 1
             // Create a buffer to hold all the data.
             char buffer[sizeof(tracedInstrCount) + sizeof(curr_instr.ip) 
                         + sizeof(curr_instr.source_registers[0]) 
-                        + sizeof(curr_instr.operand_vals[0]) ];
-                        // + sizeof(reg_width)];
+                        + sizeof(curr_instr.operand_vals[0])
+                        + sizeof(op_is_diff_source)
+                        + sizeof(reg_width)];
 
             // Use memcpy to copy data to the buffer.
             char* dest = buffer;
 
             memcpy(dest, &tracedInstrCount, sizeof(tracedInstrCount));
             dest += sizeof(tracedInstrCount);
-
             memcpy(dest, &(curr_instr.ip), sizeof(curr_instr.ip));
             dest += sizeof(curr_instr.ip);
-
             memcpy(dest, &(curr_instr.source_registers[0]), sizeof(curr_instr.source_registers[0]));
             dest += sizeof(curr_instr.source_registers[0]);
-
             memcpy(dest, &(curr_instr.operand_vals[0]), sizeof(curr_instr.operand_vals[0]));
             dest += sizeof(curr_instr.operand_vals[0]);
+            memcpy(dest, &op_is_diff_source, sizeof(op_is_diff_source));
+            dest += sizeof(op_is_diff_source);
+            memcpy(dest, &reg_width, sizeof(reg_width));
+            dest += sizeof(reg_width);
 
-            // memcpy(dest, &reg_width, sizeof(reg_width));
-            // dest += sizeof(reg_width);
+            if (!KnobOperandValDiffDataSizeOutput.Value()){
+                operandval_outfiles[0].write(buffer, sizeof(buffer));
+            } else {
+                if (reg_width == REGWIDTH_8) { operandval_outfiles_diffsize[0].write(buffer, sizeof(buffer)); }
+                else if (reg_width == REGWIDTH_16) { operandval_outfiles_diffsize[1].write(buffer, sizeof(buffer)); }
+                else if (reg_width == REGWIDTH_32) { operandval_outfiles_diffsize[2].write(buffer, sizeof(buffer)); }
+                else if (reg_width == REGWIDTH_64) { operandval_outfiles_diffsize[3].write(buffer, sizeof(buffer)); }
+                else { operandval_outfiles_diffsize[4].write(buffer, sizeof(buffer)); }
+            }
 
-            // Write the buffer to the file in one call.
-            // operand_val_outfile.write(buffer, sizeof(buffer));
+            
+            // operandval_outfile.write((char*)(&tracedInstrCount), sizeof(tracedInstrCount));
+            // operandval_outfile.write((char*)(&(curr_instr.ip)), sizeof(curr_instr.ip));
+            // operandval_outfile.write((char*)(&(curr_instr.source_registers[0])), sizeof(curr_instr.source_registers[0]));
+            // operandval_outfile.write((char*)(&(curr_instr.operand_vals[0])), sizeof(curr_instr.operand_vals[0]));
+            // operandval_outfile.write((char*)(&reg_width), sizeof(reg_width));
 
-            //Short cut: write 3 files for <=16bit, 32 bit, and >=64bit. Need to make the code better afterwards
-            if ((reg_width == REGWIDTH_8) || (reg_width == REGWIDTH_16 ))operand_val_outfile16.write(buffer, sizeof(buffer));
-            else if (reg_width == REGWIDTH_32) operand_val_outfile32.write(buffer, sizeof(buffer));
-            else operand_val_outfile64.write(buffer, sizeof(buffer));
-
-            // operand_val_outfile.write((char*)(&tracedInstrCount), sizeof(tracedInstrCount));
-            // operand_val_outfile.write((char*)(&(curr_instr.ip)), sizeof(curr_instr.ip));
-            // operand_val_outfile.write((char*)(&(curr_instr.source_registers[0])), sizeof(curr_instr.source_registers[0]));
-            // operand_val_outfile.write((char*)(&(curr_instr.operand_vals[0])), sizeof(curr_instr.operand_vals[0]));
-            // operand_val_outfile.write((char*)(&reg_width), sizeof(reg_width));
-
-            // operand_val_outfile << dec << tracedInstrCount << ", " << (UINT64)(curr_instr.ip) << ", " << (UINT64)(curr_instr.source_registers[0]) << ", " << (UINT64)(curr_instr.operand_vals[0]) << ", " << (int)reg_width << endl;
+            operandval_outfiles[1] << dec << tracedInstrCount << ", " << (UINT64)(curr_instr.ip) << ", " << (UINT64)(curr_instr.source_registers[0]) << ", " << (UINT64)(curr_instr.operand_vals[0]) << ", " << (int)op_is_diff_source << ", " << (int)reg_width << endl;
         }
     }
 }
@@ -283,29 +321,29 @@ void BranchOrNot(UINT32 taken)
 //This function was used to put a reg/memop into a list
 //WriteValToSet writes both reg names and vals; original WriteToSet func only works for mem ops (no vals for now, might add later)
 // Use PIN_GetContextRegval (more flexible, can be used as long as we have context)
-void WriteValToSet(unsigned char* begin, unsigned char* end, UINT32 r, CONTEXT* ctxt, REG reg)
+void WriteValToSet(unsigned char* begin, unsigned char* end, UINT32 r, CONTEXT* ctxt, REG reg, bool is_source_reg)
 {
     if (should_write && (PIN_ThreadId() == 0)){
-        auto set_end = std::find(begin, end, 0);
-        auto found_reg = std::find(begin, set_end, r); // check to see if this register is already in the list
+        auto set_end = find(begin, end, 0);
+        auto found_reg = find(begin, set_end, r); // check to see if this register is already in the list
         // If the register is not found in the list, insert it
-        int nth_reg = std::distance(begin, found_reg);
-        if (curr_instr.operand_vals[nth_reg] == 0xdeadbeefdeadbeef) { //don't overwrite; overwrites are from flags and not what we want
-            *found_reg = r;
+        int nth_reg = distance(begin, found_reg);
 
-            // Uses PINTOOL_REGISTER from util, can hold any reg size, can interpret with different sizes
-            PINTOOL_REGISTER val;
-            PIN_GetContextRegval(ctxt, reg, reinterpret_cast< UINT8* >(&val));
-            curr_instr.operand_vals[nth_reg] = val.qword[0];
-        }
+        *found_reg = r;
+
+        // Uses PINTOOL_REGISTER from util, can hold any reg size, can interpret with different sizes
+        PINTOOL_REGISTER val;
+        PIN_GetContextRegval(ctxt, reg, reinterpret_cast< UINT8* >(&val));
+        // only write to operand_vals for source registers
+        if (is_source_reg) curr_instr.operand_vals[nth_reg] = val.qword[0];
     }
 }
 
 void WriteToSet(unsigned long long int* begin, unsigned long long int* end, ADDRINT r)
 {
     if (should_write && (PIN_ThreadId() == 0)){
-        auto set_end = std::find(begin, end, 0);
-        auto found_reg = std::find(begin, set_end, r); // check to see if this register is already in the list
+        auto set_end = find(begin, end, 0);
+        auto found_reg = find(begin, set_end, r); // check to see if this register is already in the list
         *found_reg = r;
     }
 }
@@ -325,11 +363,11 @@ VOID ReadContent(ADDRINT ins_addr, VOID* memread_addr, UINT32 memread_size, cons
         UINT64 value = 0;
         // global counters for mem read size: 
         UINT8 memread_size_type = 4; // 0,1,2,3,4 for 8,16,32,64,>64, default >64
-        if (memread_size <= 1) {memread_size8_counter++; memread_size_type=0;}
-        else if (memread_size <= 2) {memread_size16_counter++; memread_size_type=1;}
-        else if (memread_size <= 4) {memread_size32_counter++; memread_size_type=2;}
-        else if (memread_size <= 8) {memread_size64_counter++; memread_size_type=3;}
-        else memread_sizeabove64_counter++;
+        if (memread_size <= 1) {memread_size_counter[0]++; memread_size_type=0;}
+        else if (memread_size <= 2) {memread_size_counter[1]++; memread_size_type=1;}
+        else if (memread_size <= 4) {memread_size_counter[2]++; memread_size_type=2;}
+        else if (memread_size <= 8) {memread_size_counter[3]++; memread_size_type=3;}
+        else memread_size_counter[4]++;
         
         // this is to prevent bigger memread_size to cause seg faults - e.g. context switch instructions can have 380 bytes memread_size and it will cause false PCs
         UINT32 memread_size_cut = memread_size;
@@ -342,16 +380,44 @@ VOID ReadContent(ADDRINT ins_addr, VOID* memread_addr, UINT32 memread_size, cons
         //check whether it's a load of different source
         bool load_is_diff_source = true;
         
-        auto it = last_operation.find((ADDRINT)memread_addr1);
+        auto it = memaddr_last_operation.find((ADDRINT)memread_addr1);
         // Write down current op = Read
-        last_operation[memread_addr1] = 'R';
+        memaddr_last_operation[memread_addr1] = 'R';
 
-        if (it != last_operation.end()){
+        if (it != memaddr_last_operation.end()){
             if(it->second == 'R') {
                 load_is_diff_source = false;
             }
         }
-        cluster_outfile << dec << memReadCount << ", " << (UINT64)ins_addr << ", " << (UINT64)memread_addr << ", " << value << ", " << load_is_diff_source << ", " << (int)memread_size_type << endl;
+
+        // Create a buffer to hold all the data. The size of each element in bytes is:
+        // 8 (for memReadCount) + 8 (for ins_addr) + 8 (for memread_addr) + 8 (for value) + 
+        // 1 (for load_is_diff_source) + 1 (for memread_size_type) = 26 bytes.
+        char buffer[sizeof(tracedInstrCount) + sizeof(curr_instr.ip) 
+                        + sizeof(curr_instr.source_registers[0]) 
+                        + sizeof(curr_instr.operand_vals[0])
+                        + sizeof(load_is_diff_source)
+                        + sizeof(memread_size_type)];
+        char* dest = buffer;
+
+        // Use memcpy to copy data to the buffer.
+        memcpy(dest, &memReadCount, sizeof(memReadCount));
+        dest += sizeof(memReadCount);
+        memcpy(dest, &ins_addr, sizeof(ins_addr));
+        dest += sizeof(ins_addr);
+        memcpy(dest, &memread_addr, sizeof(memread_addr));
+        dest += sizeof(memread_addr);
+        memcpy(dest, &value, sizeof(value));
+        dest += sizeof(value);
+        memcpy(dest, &load_is_diff_source, sizeof(load_is_diff_source));
+        dest += sizeof(load_is_diff_source);
+        memcpy(dest, &memread_size_type, sizeof(memread_size_type));
+        // dest += sizeof(memread_size_type); // This line is not needed as it's the last item.
+
+        // Write the buffer to the file in one call.
+        loadval_outfiles[0].write(buffer, sizeof(buffer));
+
+        loadval_outfiles[1] << dec << memReadCount << ", " << (UINT64)ins_addr << ", " << (UINT64)memread_addr << ", " << value << ", " << load_is_diff_source << ", " << (int)memread_size_type << endl;
     }
 }
 
@@ -359,7 +425,7 @@ VOID ReadContent(ADDRINT ins_addr, VOID* memread_addr, UINT32 memread_size, cons
 VOID RecordWriteAddr(ADDRINT memwrite_addr) {
     if (should_write && (PIN_ThreadId() == 0)){
         memwrite_addr = memwrite_addr - (memwrite_addr % 64);
-        last_operation[memwrite_addr] = 'S'; 
+        memaddr_last_operation[memwrite_addr] = 'S'; 
     }
 }
 
@@ -394,12 +460,13 @@ VOID Instruction(INS ins, VOID* v)
             IARG_UINT32, regNum, 
             IARG_CONTEXT,
             IARG_ADDRINT, regNum,
+            IARG_BOOL, true,
             IARG_END);
         }
     }
 
     // instrument register writes
-    UINT32 writeRegCount = INS_MaxNumWRegs(ins);
+    UINT32 writeRegCount = INS_MaxNumWRegs(ins);  
     for(UINT32 i=0; i<writeRegCount; i++) 
     {
         UINT32 regNum = INS_RegW(ins, i);
@@ -408,6 +475,7 @@ VOID Instruction(INS ins, VOID* v)
             IARG_UINT32, regNum, 
             IARG_CONTEXT,
             IARG_ADDRINT, regNum,
+            IARG_BOOL, false,
             IARG_END);
     }
 
@@ -440,12 +508,9 @@ VOID Instruction(INS ins, VOID* v)
         }
     }
 
-    // finalize each instruction with this function
-    INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteCurrentInstruction, IARG_END);
-
     // ++++++++++++++++++++++++++++++++++++++++++
     // gen cluster trace: 
-    if (INS_IsMemoryRead(ins) && (!INS_IsPrefetch(ins)) && (INS_Disassemble(ins).find("gather") == std::string::npos) && (INS_Opcode(ins) != XED_ICLASS_TILELOADD)){
+    if (INS_IsMemoryRead(ins) && (!INS_IsPrefetch(ins)) && (INS_Disassemble(ins).find("gather") == string::npos) && (INS_Opcode(ins) != XED_ICLASS_TILELOADD)){
         INS_InsertCall(ins,
             IPOINT_BEFORE,
             AFUNPTR(ReadContent),
@@ -456,7 +521,7 @@ VOID Instruction(INS ins, VOID* v)
             IARG_PTR, new string(INS_Disassemble(ins)),
             IARG_END);
     } 
-    if (INS_IsMemoryWrite(ins) && (INS_Disassemble(ins).find("scatter") == std::string::npos) && (INS_Opcode(ins) != XED_ICLASS_TILESTORED) && INS_IsValidForIpointAfter(ins)) { // Mark silent stores
+    if (INS_IsMemoryWrite(ins) && (INS_Disassemble(ins).find("scatter") == string::npos) && (INS_Opcode(ins) != XED_ICLASS_TILESTORED) && INS_IsValidForIpointAfter(ins)) { // Mark silent stores
         INS_InsertCall(ins,
             IPOINT_BEFORE,
             (AFUNPTR)RecordWriteAddr,
@@ -464,6 +529,9 @@ VOID Instruction(INS ins, VOID* v)
             IARG_END);
     }
     // ++++++++++++++++++++++++++++++++++++++++++
+
+    // finalize each instruction with this function, write out operand values file
+    INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR)WriteCurrentInstruction, IARG_END);
     
     //Debug function that prints out instructions in a readable form
     if (KnobDebug.Value()){
@@ -490,16 +558,21 @@ VOID Fini(INT32 code, VOID *v)
     debugfile << dec << "Total Inst Count: " << progInstrCount << " Traced Inst Count: " << tracedInstrCount << " Mem Count: " << memReadCount << endl;
     //print out pie chart for mem read size counts
     debugfile << "memreadsize,8,16,32,64,above" << endl;
-    debugfile << memread_size8_counter << "," << memread_size16_counter << "," << memread_size32_counter << "," << memread_size64_counter << "," << memread_sizeabove64_counter << endl;
+    debugfile << memread_size_counter[0] << "," << memread_size_counter[1] << "," << memread_size_counter[2] << "," << memread_size_counter[3] << "," << memread_size_counter[4] << endl;
     //print out pie chart for non-mem operand size counts
     debugfile << "regsize,8,16,32,64,above" << endl;
-    debugfile << reg_size8_counter << "," << reg_size16_counter << "," << reg_size32_counter << "," << reg_size64_counter << "," << reg_sizeabove64_counter << endl;
+    debugfile << reg_size_counter[0] << "," << reg_size_counter[1] << "," << reg_size_counter[2] << "," << reg_size_counter[3] << "," << reg_size_counter[4] << endl;
 
-    if (champsim_outfile.is_open()) champsim_outfile.close();
-    if (cluster_outfile.is_open()) cluster_outfile.close();
-    if (operand_val_outfile16.is_open()) operand_val_outfile16.close();
-    if (operand_val_outfile32.is_open()) operand_val_outfile32.close();
-    if (operand_val_outfile64.is_open()) operand_val_outfile64.close();
+    if (scheduler_outfile.is_open()) scheduler_outfile.close();
+    vector<string> suffixes = {"", ".csv"};
+    for (size_t i = 0; i < TRACE_SUFFIXES_SIZE; ++i) {
+        if (loadval_outfiles[i].is_open()) loadval_outfiles[i].close();
+        if (operandval_outfiles[i].is_open()) operandval_outfiles[i].close();
+    }
+    vector<string> diffsize_suffixes = {"_8bit", "_16bit", "_32bit", "_64bit", "_above64bit"}; 
+    for (size_t i = 0; i < TRACE_DIFFSIZE_SUFFIXES_SIZE; ++i) {
+        if (operandval_outfiles_diffsize[i].is_open()) operandval_outfiles_diffsize[i].close();
+    }
     if (debugfile.is_open()) debugfile.close();
 }
 
@@ -520,40 +593,37 @@ int main(int argc, char *argv[])
         return Usage();
 
     // open 2 trace files
-    champsim_outfile.open(KnobSchedulerOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
-    if (!champsim_outfile)
-    {
-      cout << "Couldn't open ChampSim output trace file. Exiting." << endl;
-        exit(1);
+    scheduler_outfile.open(KnobSchedulerOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
+
+
+    for (size_t i = 0; i < TRACE_SUFFIXES_SIZE; ++i) {
+        ostringstream ldfilename;
+        ldfilename << dec << KnobLoadValOutputFile.Value().c_str() << trace_suffixes[i];
+        loadval_outfiles[i].open(ldfilename.str().c_str());
+        loadval_outfiles[i] << "Index,PC,Source Reg/Addr,Data Value,Diff Source,Data Size" << endl;
     }
-    cluster_outfile.open(KnobLoadValOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
-    if (!cluster_outfile)
-    {
-      cout << "Couldn't open Cluster output trace file. Exiting." << endl;
-        exit(1);
+    for (size_t i = 0; i < TRACE_SUFFIXES_SIZE; ++i) {
+        ostringstream opfilename;
+        opfilename << dec << KnobOperandValOutputFile.Value().c_str() << trace_suffixes[i];
+        operandval_outfiles[i].open(opfilename.str().c_str());
+        operandval_outfiles[i] << "Index,PC,Source Reg/Addr,Data Value,Diff Source,Data Size" << endl;
     }
 
-    std::ostringstream opfilename1;
-    opfilename1 << dec << KnobOperandValOutputFile.Value().c_str() << "_16bit";
-    operand_val_outfile16.open(opfilename1.str().c_str());
-    std::ostringstream opfilename2;
-    opfilename2 << dec << KnobOperandValOutputFile.Value().c_str() << "_32bit";
-    operand_val_outfile32.open(opfilename2.str().c_str());
-    std::ostringstream opfilename3;
-    opfilename3 << dec << KnobOperandValOutputFile.Value().c_str() << "_64bit";
-    operand_val_outfile64.open(opfilename3.str().c_str());
+    if (KnobOperandValDiffDataSizeOutput.Value()){ 
+        
+        for (size_t i = 0; i < TRACE_DIFFSIZE_SUFFIXES_SIZE; ++i) {
+            ostringstream opfilename;
+            opfilename << dec << KnobOperandValOutputFile.Value().c_str() << trace_diffsize_suffixes[i];
+            operandval_outfiles_diffsize[i].open(opfilename.str().c_str());
+            operandval_outfiles_diffsize[i] << "Index,PC,Source Reg/Addr,Data Value,Diff Source,Data Size" << endl;
+        }
+    }
 
-    // operand_val_outfile.open(KnobOperandValOutputFile.Value().c_str(), ios_base::binary | ios_base::trunc);
-    // if (!operand_val_outfile)
-    // {
-    //   cout << "Couldn't open Operand Val output trace file. Exiting." << endl;
-    //     exit(1);
-    // }
-
-    
-
+ 
     //Debug file that writes out human-readable instructions
-    if (KnobDebug.Value()) {debugfile.open(KnobDebugFile.Value().c_str());}
+    if (KnobDebug.Value()) {
+        debugfile.open(KnobDebugFile.Value().c_str());
+    }
 
     // Register Routine to be called to instrument rtn
     INS_AddInstrumentFunction(Instruction, 0);
