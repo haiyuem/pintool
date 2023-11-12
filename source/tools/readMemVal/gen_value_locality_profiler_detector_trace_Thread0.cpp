@@ -149,7 +149,7 @@ INT32 Usage()
         << "Specify the load values output trace file with -cluster_trace_output" << endl 
         << "Specify the operand values output trace file with -operand_val_trace_output" << endl 
         << "Specify whether to print out individual data size operand val trace with -produce_individual_trace_for_data_size" << endl
-        << "Specify whether to print out to print out debug info in another file with -d" << endl
+        << "Specify whether to print out debug info in another file with -d" << endl
         << "Specify the debug file name with -debug_file_name" << endl
         << "Specify the number of instructions to skip before tracing with -s" << endl
         << "Specify the number of instructions to trace with -t; default = 0 means no upper limit" << endl 
